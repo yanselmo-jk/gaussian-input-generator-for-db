@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rmlipdata"
+version = "0.1.0"
+description = "Reactive electrolyte cluster dataset generator (xTB paths -> Gaussian16 decks) and Gaussian16 log parser"
+requires-python = ">=3.10"
+dependencies = ["numpy", "ase", "rdkit", "pyyaml"]
+
+[project.scripts]
+rmd = "rmlipdata.cli:main"
+
+[tool.setuptools]
+packages = ["rmlipdata"]
+
+[tool.setuptools.package-data]
+rmlipdata = ["data/*.tsv", "data/basis/*.gbs"]

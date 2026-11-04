@@ -1,0 +1,16 @@
+out: runs/example
+seed: 0
+species: {cations: [Li, Na], anions: [PF6, FSI, TFSI, BF4, ClO4], solvents: [EC, PC, DMC, EMC, DEC, FEC, DME]}
+charge: {delta_q: [0, -1, 1], mult_offsets: [0, 2]}
+g16: {nproc: 16, mem: 32GB}
+limits: {max_atoms: 60}
+xtb: {threads: 4, timeout_s: 1800}
+cluster: {min_components: 1, max_components: 3, max_cations: 2, max_combos: 50}
+samplers:
+  monomer: {on: true, n_normal_mode: 10, n_distort: 5, T_K: 500}
+  pair_scan: {on: true, max_pairs: 40, n_orient: 3, scales: [0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.5, 2.0]}
+  cluster: {on: true, n_distort: 5, rattle_A: 0.1}
+  bond_scan: {on: true, n_points: 12, max_bonds_per_cluster: 6, bs: true}
+  reaction: {on: true, templates: [add, substitute, transfer], n_points: 14, k_peak: 2, max_per_cluster: 6, bs: true}
+  hop: {on: true, n_points: 10, max_per_cluster: 3}
+  nanoreactor: {on: false, T_K: 1500, ncyc: 2, every_n_frames: 50}

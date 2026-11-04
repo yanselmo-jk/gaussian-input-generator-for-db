@@ -1,0 +1,35 @@
+# copied from 1_electrolyte_inverse_design/data/track2/known_anions.tsv @ 318e8ac
+# Real Li-ion electrolyte anions. Charge is EXPLICIT and the spelling convention is pinned
+# per row -- see docs/track2_chemistry_spec.md §6. Dual use: Track 2 L3, and Track 1's anion
+# fine-tune, which trains on the 19 non-EXCLUDED rows (widened at 4c0b0c2; the header previously
+# said five and was stale). G1 there is a memorization check by construction either way: fine-tuning
+# on 19 and scoring reconstruction on the same 19 is in-sample.
+#
+# EXCLUSIONS ARE CHEMISTRY, NOT TOKENIZATION. Both excluded rows are out of Track 2's ELEMENT SET,
+# and the element set is a decision about what the molecular universe contains -- independent of
+# any tokenizer. That AsF6 also happens to add a character under the char tokenizer is incidental
+# and is NOT the reason; a tokenizer change does not reopen either row.
+# `alphabet_ok` is measured, not asserted: whether the SMILES stays inside ZINC-250k's
+# character set (the pretrain vocabulary). See §6.3.
+name	abbrev	smiles	charge	note
+hexafluorophosphate	PF6	F[P-](F)(F)(F)(F)F	-1	hypervalent P(-) spelling, not charge-separated
+tetrafluoroborate	BF4	F[B-](F)(F)F	-1	
+perchlorate	ClO4	[O-]Cl(=O)(=O)=O	-1	MEASURED: both the hypervalent and the charge-separated spelling canonicalize to [O-][Cl+3]([O-])([O-])[O-], which is the catalog's stored form. Not ambiguous AFTER canonicalization
+difluorophosphate	DFP	[O-]P(=O)(F)F	-1	
+bis(trifluoromethanesulfonyl)imide	TFSI	O=S(=O)(C(F)(F)F)[N-]S(=O)(=O)C(F)(F)F	-1	MEASURED: canonicalizes to the catalog's stored TFSI exactly. Charge on N
+bis(fluorosulfonyl)imide	FSI	O=S(=O)(F)[N-]S(=O)(=O)F	-1	MEASURED: canonicalizes to the catalog's stored FSI exactly. Charge on N
+(fluorosulfonyl)(trifluoromethanesulfonyl)imide	FTFSI	O=S(=O)(F)[N-]S(=O)(=O)C(F)(F)F	-1	
+bis(pentafluoroethanesulfonyl)imide	BETI	O=S(=O)(C(F)(F)C(F)(F)F)[N-]S(=O)(=O)C(F)(F)C(F)(F)F	-1	
+trifluoromethanesulfonate (triflate)	OTf	[O-]S(=O)(=O)C(F)(F)F	-1	
+trifluoroacetate	TFA	[O-]C(=O)C(F)(F)F	-1	
+bis(oxalato)borate	BOB	O=C1O[B-]2(OC(=O)C(=O)O2)OC1=O	-1	anionic centre is the 4-coordinate B
+difluoro(oxalato)borate	DFOB	F[B-]1(F)OC(=O)C(=O)O1	-1	ALIAS: also written ODFB (lithium oxalyldifluoroborate). Same anion, BF2(C2O4)-; both abbreviations are in common use. Recorded so a search for ODFB does not conclude it is absent.
+tetracyanoborate	TCB	N#C[B-](C#N)(C#N)C#N	-1	
+4,5-dicyano-2-(trifluoromethyl)imidazolide	TDI	N#Cc1nc(C(F)(F)F)[n-]c1C#N	-1	aromatic anion; charge on ring N
+tris(pentafluoroethyl)trifluorophosphate	FAP	F[P-](F)(F)(C(F)(F)C(F)(F)F)(C(F)(F)C(F)(F)F)C(F)(F)C(F)(F)F	-1	
+nitrate	NO3	[O-][N+](=O)[O-]	-1	charge-separated is the standard spelling here
+chloride	Cl	[Cl-]	-1	single atom; real in some Li-S / conversion chemistries
+fluorosulfonate	FSO3	[O-]S(=O)(=O)F	-1	
+methanesulfonate (mesylate)	OMs	[O-]S(=O)(=O)C	-1	
+hexafluoroarsenate	AsF6	F[As-](F)(F)(F)(F)F	-1	EXCLUDED from the element set (As). CHEMISTRY REASON: LiAsF6 is a real historical Li-ion salt, abandoned on arsenic toxicity rather than on performance. Listed so its absence is deliberate rather than an oversight
+bromide	Br	[Br-]	-1	EXCLUDED from the element set (Br). CHEMISTRY REASON: bromide is oxidised well below the cathode potentials these formulations target, so it is not a stable anion in a 4 V cell. Listed for the same reason

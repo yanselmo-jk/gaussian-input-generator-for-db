@@ -1,0 +1,50 @@
+# copied from 1_electrolyte_inverse_design/data/track2/known_electrolytes.tsv @ 318e8ac
+# Track 2 known-molecule list. Two jobs:
+#   1. RECALL  -- every row the enumeration pipeline should be able to re-derive.
+#   2. PROTECTED -- rows with role=additive MUST survive the additive filter.
+# Sources: standard Li-ion electrolyte solvent/additive literature. Neutral species only
+# (the user's spec fixes formal charge 0), so salts and their anions are deliberately absent.
+name	smiles	role	family
+ethylene carbonate (EC)	O=C1OCCO1	solvent	cyclic_carbonate
+propylene carbonate (PC)	CC1COC(=O)O1	solvent	cyclic_carbonate
+butylene carbonate (BC)	CCC1COC(=O)O1	solvent	cyclic_carbonate
+dimethyl carbonate (DMC)	COC(=O)OC	solvent	linear_carbonate
+diethyl carbonate (DEC)	CCOC(=O)OCC	solvent	linear_carbonate
+ethyl methyl carbonate (EMC)	CCOC(=O)OC	solvent	linear_carbonate
+1,2-dimethoxyethane (DME)	COCCOC	solvent	linear_ether
+diglyme	COCCOCCOC	solvent	linear_ether
+tetrahydrofuran (THF)	C1CCOC1	solvent	cyclic_ether
+1,3-dioxolane (DOL)	C1COCO1	solvent	cyclic_ether
+1,4-dioxane	C1COCCO1	solvent	cyclic_ether
+2-methyltetrahydrofuran	CC1CCCO1	solvent	cyclic_ether
+gamma-butyrolactone (GBL)	O=C1CCCO1	solvent	lactone
+gamma-valerolactone	CC1CCC(=O)O1	solvent	lactone
+methyl acetate	COC(C)=O	solvent	linear_ester
+ethyl propionate	CCOC(=O)CC	solvent	linear_ester
+sulfolane	O=S1(=O)CCCC1	solvent	sulfone
+dimethyl sulfone	CS(C)(=O)=O	solvent	sulfone
+acetonitrile (AN)	CC#N	solvent	nitrile
+dimethyl sulfoxide (DMSO)	CS(C)=O	solvent	sulfoxide
+N,N-dimethylformamide (DMF)	CN(C)C=O	solvent	amide
+N-methyl-2-pyrrolidone (NMP)	CN1CCCC1=O	solvent	amide
+trimethyl phosphate (TMP)	COP(=O)(OC)OC	solvent	phosphate
+triethyl phosphate (TEP)	CCOP(=O)(OCC)OCC	solvent	phosphate
+fluoroethylene carbonate (FEC)	O=C1OCC(F)O1	additive	fluorinated_carbonate
+difluoroethylene carbonate (DFEC)	O=C1OC(F)C(F)O1	additive	fluorinated_carbonate
+methyl 2,2,2-trifluoroethyl carbonate (F-EMC)	COC(=O)OCC(F)(F)F	additive	fluorinated_carbonate
+vinylene carbonate (VC)	O=C1OC=CO1	additive	unsaturated_carbonate
+vinyl ethylene carbonate (VEC)	C=CC1COC(=O)O1	additive	unsaturated_carbonate
+ethylene sulfite (ES)	O=S1OCCO1	additive	cyclic_sulfite
+ethylene sulfate (DTD)	O=S1(=O)OCCO1	additive	cyclic_sulfate
+1,3-propane sultone (PS)	O=S1(=O)CCCO1	additive	sultone
+prop-1-ene-1,3-sultone (PES)	O=S1(=O)C=CCO1	additive	sultone
+succinic anhydride (SA)	O=C1CCC(=O)O1	additive	anhydride
+adiponitrile (ADN)	N#CCCCCC#N	additive	dinitrile
+succinonitrile (SN)	N#CCCC#N	additive	dinitrile
+tris(trimethylsilyl) phosphite (TMSP)	C[Si](C)(C)OP(O[Si](C)(C)C)O[Si](C)(C)C	additive	silyl_phosphite
+tris(trimethylsilyl) borate (TMSB)	C[Si](C)(C)OB(O[Si](C)(C)C)O[Si](C)(C)C	additive	silyl_borate
+trimethyl borate (TMB)	COB(OC)OC	additive	borate_ester
+trimethyl phosphite (TMPi)	COP(OC)OC	additive	phosphite
+biphenyl (BP)	c1ccc(-c2ccccc2)cc1	additive	aromatic_overcharge
+fluorobenzene (FB)	Fc1ccccc1	additive	aromatic_overcharge
+cyclohexylbenzene (CHB)	c1ccc(C2CCCCC2)cc1	additive	aromatic_overcharge
