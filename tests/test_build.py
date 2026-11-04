@@ -108,6 +108,8 @@ def test_sampler_guards():
     assert not sample._fragmented(two)
     two["positions"][1, 2] = 40.0                      # Coulomb-exploded pair
     assert sample._fragmented(two)
+    frames = [[[0, 0, 0], [0, 0, z]] for z in (2.0, 3.5, 4.5, 3.0)]
+    assert sample._until_apart(two, frames) == 2       # frames after the first > 4 A separation are dropped
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         assert sample._until_jump([0.0, 1.0, 2.0, -64.0, -63.0]) == 3   # drop points after a > 5 eV jump

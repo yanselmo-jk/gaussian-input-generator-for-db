@@ -200,6 +200,15 @@ def _until_jump(E, tol=5.0):
     return len(E)
 
 
+def _until_apart(cl, frames):
+    """Number of leading scan frames before a member drifts > 4 A from the rest (relaxed scans let e.g. Li+
+    leave a stretched EC radical cation in a q=+2 cluster)."""
+    for k, f in enumerate(frames):
+        if _fragmented({"members": cl["members"], "positions": np.asarray(f, float)}):
+            return k
+    return len(frames)
+
+
 def _kabsch(x, ref, idx):
     """x rigidly moved so that atoms idx best overlay ref."""
     a, b = x[idx] - x[idx].mean(0), ref[idx] - ref[idx].mean(0)
@@ -341,7 +350,7 @@ def cluster(ctx, scfg, delta_q):
         for k in range(int(scfg.get("n_distort", 0))):
             if n >= _limit(scfg):
                 return
-            pos = _rattle(cl["positions"], float(scfg.get("rattle_A", 0.1)), ctx.rng)
+            pos = _rattle(cl["positions"], float(scfg.get("rattle_A", 0.05)), ctx.rng)
             if pos is None:
                 continue
             yield _rec(ctx, cl["symbols"], pos, q, "cluster", combo, "sp", False,
@@ -392,7 +401,7 @@ def bond_scan(ctx, scfg, delta_q):
                             timeout=_timeout(ctx))
             if not r.get("ok"):
                 continue
-            kmax = _until_jump(r["E_eV"])
+            kmax = min(_until_jump(r["E_eV"]), _until_apart(cl, r["frames"]))
             for k, (frame, energy) in enumerate(zip(r["frames"][:kmax], r["E_eV"][:kmax])):
                 if n >= _limit(scfg):
                     return
@@ -507,7 +516,7 @@ def reaction(ctx, scfg, delta_q):
                             constraints=cons, scan=dict(n=npts, ranges=ranges), timeout=_timeout(ctx))
             if not r.get("ok"):
                 continue
-            E = r["E_eV"][:_until_jump(r["E_eV"])]
+            E = r["E_eV"][:min(_until_jump(r["E_eV"]), _until_apart(cl, r["frames"]))]
             if len(E) < 3:
                 continue
             p = 1 + int(np.argmax(E[1:-1]))
@@ -546,8 +555,9 @@ def hop(ctx, scfg, delta_q):
                       for i in idxs if symbols[i] in DONORS]
             if not donors:
                 continue
-            near = min(donors, key=lambda z: np.linalg.norm(pos[m] - pos[z[3]]))
-            targets = [z for z in donors if 2.6 < np.linalg.norm(pos[m] - pos[z[3]]) < 6.0]
+            d1 = int(min(donors, key=lambda z: np.linalg.norm(pos[m] - pos[z[3]]))[3])
+            # the start donor itself is a target when the cation sits > 2.6 A from it (e.g. Na0): exclude it
+            targets = [z for z in donors if z[3] != d1 and 2.6 < np.linalg.norm(pos[m] - pos[z[3]]) < 6.0]
             if len(targets) > max_per:
                 targets = [targets[i] for i in ctx.rng.permutation(len(targets))[:max_per]]
             for mem, name, idxs, d2 in targets:
@@ -558,7 +568,6 @@ def hop(ctx, scfg, delta_q):
                 if np.linalg.norm(u) < 1e-8:
                     continue
                 p2 = pos[d2] + build.D_M.get(cation, 2.0) * u / np.linalg.norm(u)
-                d1 = int(near[3])
                 p1 = pos[m].copy()
                 rest = [i for i in range(len(symbols)) if i != m]
                 rcov = np.array([_cov(symbols, i) for i in range(len(symbols))])
@@ -571,6 +580,8 @@ def hop(ctx, scfg, delta_q):
                     cur[m] = pt
                     cons = [(m, d1, float(np.linalg.norm(pt - pos[d1]))), (m, int(d2), float(np.linalg.norm(pt - pos[d2]))),
                             (d1, int(d2), float(np.linalg.norm(pos[d1] - pos[d2])))]
+                    if any(r0 < 0.75 * (rcov[m] + rcov[d]) for _, d, r0 in cons[:2]):
+                        continue  # path runs through a donor; the guard below would drop this frame anyway
                     r = xtb.run_xtb(symbols, cur, q, _uhf(symbols, q), ctx.workdir, mode="opt",
                                     constraints=cons, timeout=_timeout(ctx))
                     if not (r.get("ok") and "positions" in r):

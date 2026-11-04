@@ -44,7 +44,7 @@
 |---|---|---|---|
 | `monomer` | 분자/음이온 최적화 구조, normal-mode 변형, torsion/angle 변형, 단원자 양이온 | `n_normal_mode`, `n_distort`, `T_K` | opt / sp |
 | `pair_scan` | 두 성분의 거리를 바꾼 binding curve | `max_pairs`, `n_orient`, `scales` | sp |
-| `cluster` | M+(solvent)n(anion)m 최적화 구조와 흔든 구조 | `n_distort`, `rattle_A` | opt / sp |
+| `cluster` | M+(solvent)n(anion)m 최적화 구조와 흔든 구조 | `n_distort`, `rattle_A` (기본 0.05 Å, xTB 기준 원자당 약 0.1 eV) | opt / sp |
 | `bond_scan` | bond 하나를 끊어질 때까지 늘인 경로 | `n_points`, `max_bonds_per_cluster`, `bs` | sp |
 | `reaction` | 첨가 / 치환 / F·H 이동 경로의 pseudo-TS | `templates`, `n_points`, `k_peak`, `max_per_cluster`, `bs` | sp |
 | `hop` | Li+/Na+가 donor 원자 사이를 옮겨 가는 경로 | `n_points`, `max_per_cluster` | sp |
@@ -72,6 +72,7 @@
   - 분자 안의 bond를 대칭 종류별로 하나씩 고름.
   - 0.85 × r0부터 1.05 × (공유결합 반지름 합) + 1.5 Å까지 xTB constrained scan을 함.
   - 이웃 frame 사이에서 xTB energy가 5 eV 넘게 뛰면 그 지점 이후 frame을 버림 (xTB 전자 상태가 바뀐 것). reaction scan에도 같은 규칙을 씀.
+  - relaxed scan이라 대상 bond 외의 원자는 각 점에서 xTB로 이완됨. 성분 간 거리가 4 Å를 넘는 첫 frame부터 버림 (예: q=+2 Li⁺–EC•⁺에서 C=O를 늘이면 Li⁺가 밀려남). reaction scan에도 같은 규칙을 씀.
 - **reaction (pseudo-TS)**
   - template:
     - `add`: 친핵 원자(O/N/F) → 친전자 원자(carbonyl C, P, S, B)
@@ -81,8 +82,10 @@
   - 엄밀한 TS가 아님. 반응 PES를 sampling하기 위한 구조임.
 - **hop**
   - 양이온 위치를 출발점에서 도착 donor 원자 앞까지 선형으로 옮김.
+  - 도착 donor는 출발 donor와 다른 원자만 고름 (양이온이 가장 가까운 donor에서 2.6 Å보다 멀면 그 donor가 후보 범위에 들어오기 때문).
   - 각 점에서 양이온–출발 donor, 양이온–도착 donor, 두 donor 사이 거리를 constraint로 묶고 나머지를 xTB로 최적화함. xtb `$fix`는 이 cluster들에서 원자를 정확히 고정하지 못함 (고정한 원자가 최대 2 Å 움직임).
   - 양이온이 어떤 원자에 공유결합 반지름 합의 0.75배보다 가까워진 frame은 버림.
+  - 양이온–donor constraint 거리 자체가 공유결합 반지름 합의 0.75배보다 짧은 점은 xTB를 돌리지 않고 건너뜀.
 
 ## Charge와 multiplicity
 
