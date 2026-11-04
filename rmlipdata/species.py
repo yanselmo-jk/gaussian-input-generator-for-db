@@ -44,8 +44,18 @@ def embed(smiles, seed=0):
         params.useRandomCoords = True
         if AllChem.EmbedMolecule(mol, params) != 0:
             raise ValueError(f"3D embedding failed: {smiles}")
+    start = mol.GetConformer().GetPositions()
     _forcefield(mol).Minimize(maxIts=2000)
+    if _min_heavy(mol) < 1.0:  # UFF types hypervalent P/S as sp3 and collapses e.g. PF5 (F-F 0.87 A): keep ETKDG
+        mol.GetConformer().SetPositions(start)
     return mol
+
+
+def _min_heavy(mol):
+    """Shortest distance between two non-H atoms (shortest real bond, C#O, is 1.13 A)."""
+    x = mol.GetConformer().GetPositions()[[a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() > 1]]
+    d = np.linalg.norm(x[:, None] - x[None], axis=-1)
+    return d[~np.eye(len(x), dtype=bool)].min(initial=np.inf)
 
 
 def _forcefield(mol):
@@ -86,6 +96,11 @@ def catalog() -> dict:
     for r in _tsv(DATA / "solvents.tsv"):
         name = _abbrev(r["name"].strip())
         out[name] = _checked(r, name, r["smiles"].strip(), 0, "solvent")
+    for r in _tsv(DATA / "extra.tsv"):
+        name = r["name"].strip()
+        if name in out:
+            raise ValueError(f"extra.tsv: {name} already in the catalog")
+        out[name] = _checked(r, name, r["smiles"].strip(), int(r["charge"]), r["kind"].strip())
     for name, smiles in CATIONS.items():
         out[name] = _checked(None, name, smiles, 1, "cation")
     return out

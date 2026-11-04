@@ -1,0 +1,32 @@
+# Added in this repo (not from 1_electrolyte_inverse_design). Species lists are general SEI / electrolyte
+# literature knowledge, not our calculation. kind: anion (charged) or solvent (neutral component).
+name	smiles	charge	kind	group
+H2O	O	0	solvent	impurity
+HF	F	0	solvent	impurity
+PF5	FP(F)(F)(F)F	0	solvent	hydrolysis
+POF3	O=P(F)(F)F	0	solvent	hydrolysis
+HPO2F2	OP(=O)(F)F	0	solvent	hydrolysis
+CO2	O=C=O	0	solvent	gas
+CO	[C-]#[O+]	0	solvent	gas
+C2H4	C=C	0	solvent	gas
+H2	[H][H]	0	solvent	gas
+LiF	[Li]F	0	solvent	sei_inorganic
+LiOH	[Li]O	0	solvent	sei_inorganic
+Li2O	[Li]O[Li]	0	solvent	sei_inorganic
+Li2CO3	[Li]OC(=O)O[Li]	0	solvent	sei_inorganic
+NaF	[Na]F	0	solvent	sei_inorganic
+NaOH	[Na]O	0	solvent	sei_inorganic
+Na2O	[Na]O[Na]	0	solvent	sei_inorganic
+Na2CO3	[Na]OC(=O)O[Na]	0	solvent	sei_inorganic
+LEDC	[Li]OC(=O)OCCOC(=O)O[Li]	0	solvent	sei_organic
+LMC	[Li]OC(=O)OC	0	solvent	sei_organic
+LiOMe	[Li]OC	0	solvent	sei_organic
+LiOEt	[Li]OCC	0	solvent	sei_organic
+EC_ro	[CH2]COC(=O)[O-]	-1	anion	radical
+MeOCO2	COC(=O)[O]	0	solvent	radical
+CH3	[CH3]	0	solvent	radical
+CH3O	C[O]	0	solvent	radical
+G3	COCCOCCOCCOC	0	solvent	glyme
+G4	COCCOCCOCCOCCOC	0	solvent	glyme
+BTFE	FC(F)(F)COCC(F)(F)F	0	solvent	lhce_diluent
+TTE	FC(F)C(F)(F)OCC(F)(F)C(F)F	0	solvent	lhce_diluent
