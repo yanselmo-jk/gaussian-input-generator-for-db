@@ -112,6 +112,29 @@ def _fallback_pack(blocks, rng):
     for n in sizes:
         out.append(np.asarray(at.positions[k:k + n], float))
         k += n
+    return _contact(out)
+
+
+def _contact(blocks, target=2.5):
+    """Move each block (rigidly, toward the blocks before it) until its shortest distance to them is target A.
+    Gas-phase xTB opt does not pull neutral molecules together from a few A apart."""
+    out = [blocks[0]]
+    for b in blocks[1:]:
+        ref = np.vstack(out)
+        v = ref.mean(axis=0) - b.mean(axis=0)
+        span = float(np.linalg.norm(v))
+        if span < 1e-8:
+            out.append(b)
+            continue
+        u = v / span
+        dmin = lambda t: np.linalg.norm((b + t * u)[:, None] - ref[None], axis=-1).min()
+        lo, hi = -span, span  # largest shift toward ref that keeps the contact >= target (bisection)
+        if dmin(0.0) <= target:
+            lo, hi = -span, 0.0
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (mid, hi) if dmin(mid) > target else (lo, mid)
+        out.append(b + lo * u)
     return out
 
 

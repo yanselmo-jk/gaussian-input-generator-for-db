@@ -1,7 +1,7 @@
 out: runs/example
 seed: 0
 species: {cations: [Li, Na], anions: [PF6, FSI, TFSI, BF4, ClO4], solvents: [EC, PC, DMC, EMC, DEC, FEC, DME]}
-charge: {delta_q: [0, -1, 1], mult_offsets: [0, 2]}
+charge: {delta_q: [0, -1, 1], mult_offsets: [0, 2], range: [-2, 2]}
 g16: {nproc: 16, mem: 32GB}
 limits: {max_atoms: 60}
 xtb: {threads: 4, timeout_s: 1800}

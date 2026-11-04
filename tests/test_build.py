@@ -96,3 +96,22 @@ def test_generate_end_to_end(tmp_path):
     assert all((r["nproc"], r["mem"]) == (("4", "8GB") if r["sampler"] == "monomer" else ("1", "1GB")) for r in rows)
     mono = next(r for r in rows if r["sampler"] == "monomer")
     assert open(mono["gjf_path"]).read().startswith("%nprocshared=4\n%mem=8GB\n")
+
+
+def test_sampler_guards():
+    import types
+    import warnings
+    from rmlipdata import sample
+    ctx = types.SimpleNamespace(cfg={"charge": {"range": [-2, 2]}})
+    assert sample._q_ok(ctx, -2) and sample._q_ok(ctx, 2) and not sample._q_ok(ctx, -3) and not sample._q_ok(ctx, 3)
+    two = {"members": [("A", [0]), ("B", [1])], "positions": np.array([[0, 0, 0], [0, 0, 3.0]])}
+    assert not sample._fragmented(two)
+    two["positions"][1, 2] = 40.0                      # Coulomb-exploded pair
+    assert sample._fragmented(two)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert sample._until_jump([0.0, 1.0, 2.0, -64.0, -63.0]) == 3   # drop points after a > 5 eV jump
+    assert sample._until_jump([0.0, 1.0, 2.0]) == 3
+    pos = np.array([[0, 0, 0], [0, 0, 5.0]])
+    moved = sample._shift_to(pos, [0], [1], np.array([0, 0, 1.0]), 1.5, 5.0)
+    assert np.isclose(moved[1, 2], 1.5, atol=1e-6) and (moved[0] == 0).all()
