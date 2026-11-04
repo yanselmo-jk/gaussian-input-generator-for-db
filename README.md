@@ -29,6 +29,11 @@ rmd status --registry runs/example/registry.sqlite
 
 - `generate`는 같은 config로 다시 실행해도 이미 있는 구조를 다시 만들지 않음 (id로 중복 제거).
 - `--only bond_scan reaction`처럼 sampler 일부만 실행할 수 있음.
+- 이미 만든, 아직 계산하지 않은(`generated`) deck의 `%nprocshared`, `%mem`을 바꾸려면 아래 명령을 씀. `.gjf`와 `manifest.csv`가 함께 바뀜.
+  ```bash
+  rmd resources --registry runs/example/registry.sqlite --nproc 32 --mem 64GB
+  rmd resources --registry runs/example/registry.sqlite --nproc 8 --mem 16GB --sampler monomer pair_scan
+  ```
 
 ### 산출물 (`out` 폴더, 예: `runs/example/`)
 
@@ -52,6 +57,7 @@ log 파일명은 `.gjf`와 같은 이름(`<id>.log`)을 유지해야 함. parser
 | `cluster.max_cations` | cluster 하나에 들어가는 Li+/Na+의 최대 개수 |
 | `cluster.max_combos` | 조합 중 무작위로 고를 개수 |
 | `limits.max_atoms` | 원자 수 상한 |
+| `g16.nproc`, `g16.mem` | Gaussian 입력의 `%nprocshared`, `%mem` 값과 manifest의 같은 열. 새로 생성하는 deck에만 적용 (이미 만든 deck은 `rmd resources`로 변경) |
 | `samplers.<이름>.on` | sampler 켜기/끄기 |
 | `samplers.<이름>.max_structures` | 그 sampler가 만들 구조 수 상한 (spin 상태로 늘리기 전 기준) |
 

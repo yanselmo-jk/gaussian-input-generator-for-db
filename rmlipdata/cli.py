@@ -2,6 +2,7 @@
 import argparse
 import csv
 import os
+import re
 import sys
 import zlib
 from pathlib import Path
@@ -88,14 +89,23 @@ def generate(cfg, only=None, dry=False):
                         registry.set_gjf(con, sid, path)
                         added[name] += 1
             con.commit()
-    manifest(con, out, nproc, mem)
+    manifest(con, out)
     for name in names:
         total = con.execute("SELECT COUNT(*) FROM structures WHERE sampler=?", (name,)).fetchone()[0]
         print(f"{name}: {added[name]} new, {total} total")
     con.close()
 
 
-def manifest(con, out, nproc, mem):
+LINK0 = {"nproc": re.compile(r"^%nprocshared=(.*)$", re.M), "mem": re.compile(r"^%mem=(.*)$", re.M)}
+
+
+def _link0(path):
+    """(nproc, mem) as written in the deck itself, so the manifest always matches the files."""
+    text = Path(path).read_text()
+    return tuple((m[1].strip() if m else "") for m in (LINK0["nproc"].search(text), LINK0["mem"].search(text)))
+
+
+def manifest(con, out):
     cols = ["id", "gjf_path", "sampler", "n_atoms", "charge", "mult", "bs", "job", "nproc", "mem"]
     rows = con.execute("SELECT " + ",".join(cols[:8]) + " FROM structures WHERE status='generated' "
                        "ORDER BY sampler, id").fetchall()
@@ -103,8 +113,33 @@ def manifest(con, out, nproc, mem):
         w = csv.writer(f)
         w.writerow(cols)
         for r in rows:
-            w.writerow([r["id"], r["gjf_path"], r["sampler"], r["n_atoms"], r["charge"], r["mult"], r["bs"],
-                        r["job"], nproc, mem])
+            w.writerow([r[k] for k in cols[:8]] + list(_link0(r["gjf_path"])))
+
+
+def resources_cmd(db, nproc=None, mem=None, samplers=None):
+    """Rewrite %nprocshared / %mem of not-yet-run decks (status 'generated') in place, then the manifest."""
+    if nproc is None and mem is None:
+        raise SystemExit("give --nproc and/or --mem")
+    con = registry.connect(db)
+    sql = "SELECT gjf_path FROM structures WHERE status='generated'"
+    if samplers:
+        sql += f" AND sampler IN ({','.join('?' * len(samplers))})"
+    n = 0
+    for (path,) in con.execute(sql, list(samplers or [])).fetchall():
+        p = Path(path)
+        text = p.read_text()
+        for key, val in (("nproc", nproc), ("mem", mem)):
+            if val is not None:
+                text, k = LINK0[key].subn(f"%{'nprocshared' if key == 'nproc' else 'mem'}={val}", text, count=1)
+                if not k:
+                    raise SystemExit(f"{p}: no %{key} line")
+        tmp = p.with_suffix(".gjf.tmp")
+        tmp.write_text(text)
+        os.replace(tmp, p)  # atomic: a crash never leaves a half-written deck
+        n += 1
+    manifest(con, Path(db).parent)
+    con.close()
+    print(f"{n} decks updated")
 
 
 def parse_cmd(paths, out, db=None):
@@ -163,6 +198,11 @@ def main(argv=None):
     q.add_argument("paths", nargs="+")
     q.add_argument("-o", required=True)
     q.add_argument("--registry")
+    r = sub.add_parser("resources", help="change %nprocshared / %mem of not-yet-run decks")
+    r.add_argument("--registry", required=True)
+    r.add_argument("--nproc", type=int)
+    r.add_argument("--mem", help="e.g. 64GB")
+    r.add_argument("--sampler", nargs="+", default=None)
     s = sub.add_parser("status", help="registry counts")
     s.add_argument("--registry", required=True)
     e = sub.add_parser("export", help="registry rows to CSV")
@@ -175,6 +215,8 @@ def main(argv=None):
         parse_cmd(a.paths, a.o, a.registry)
     elif a.cmd == "status":
         status_cmd(a.registry)
+    elif a.cmd == "resources":
+        resources_cmd(a.registry, a.nproc, a.mem, a.sampler)
     else:
         export_cmd(a.registry, a.o)
     return 0

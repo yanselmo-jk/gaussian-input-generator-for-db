@@ -88,3 +88,11 @@ def test_generate_end_to_end(tmp_path):
     con = registry.connect(db)
     assert con.execute("SELECT COUNT(*) FROM structures").fetchone()[0] == n_before
     con.close()
+
+    assert cli.main(["resources", "--registry", str(db), "--nproc", "4", "--mem", "8GB",
+                     "--sampler", "monomer"]) == 0
+    with open(tmp_path / "run" / "manifest.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert all((r["nproc"], r["mem"]) == (("4", "8GB") if r["sampler"] == "monomer" else ("1", "1GB")) for r in rows)
+    mono = next(r for r in rows if r["sampler"] == "monomer")
+    assert open(mono["gjf_path"]).read().startswith("%nprocshared=4\n%mem=8GB\n")
