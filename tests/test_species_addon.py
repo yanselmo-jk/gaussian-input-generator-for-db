@@ -109,9 +109,9 @@ def test_collision_and_force(tmp_path):
 
 def test_element_without_basis(tmp_path):
     p = tmp_path / "hbr.xyz"
-    p.write_text("2\nhbr\nBr 0 0 0\nH 0 0 1.5\n")
-    with pytest.raises(ValueError, match="Br"):
-        species.add_user_species(p, "HBr")
+    p.write_text("2\nhi\nI 0 0 0\nH 0 0 1.6\n")  # I (Z=53) needs an ECP: not supported
+    with pytest.raises(ValueError, match="I"):
+        species.add_user_species(p, "HI")
 
 
 def test_geometry_keeps_file_atom_order(tmp_path, monkeypatch):

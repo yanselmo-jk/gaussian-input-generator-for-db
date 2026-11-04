@@ -6,6 +6,7 @@ from ase.data import atomic_numbers
 
 BASIS_FILE = Path(__file__).parent / "data" / "basis" / "def2-TZVPPD.gbs"
 # iop(6/80=1): Loewdin population; pop=npa: NBO natural population analysis.
+# Basis file covers H-Kr (Z 1-36), all-electron in def2 (no ECP); Rb and heavier would need genecp.
 # UNVERIFIED until the test decks run: Loewdin/NPA spin output format (see README).
 ROUTE = "#p {ref}wB97XD/gen nosymm int=ultrafine scf=(xqc,maxcycle=300) pop=(npa) iop(6/80=1)"
 JOB = {"sp": "force", "opt": "opt=(maxcycles=200)"}
