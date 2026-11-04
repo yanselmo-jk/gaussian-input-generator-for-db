@@ -36,16 +36,12 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 - spin contamination(`s2_dev`)이 큰 frame도 값만 저장하고 걸러내지 않음.
 - NBO spin은 NBO 출력의 alpha와 beta natural population 차이로 계산함.
 
-## 미검증 사항
+## 확인 결과 (Hangang G16 c02, job 1212786, 2026-11-04, test_decks/ t1–t3)
 
-`test_decks/`의 Gaussian 입력 3개를 실행한 log로 확인한 뒤 parser를 확정할 예정임.
-
-| test deck | 확인할 것 |
-|---|---|
-| `t1_li_ec_q1_m1_opt.gjf` | closed-shell opt. Loewdin/NPA charge 출력 형식, opt 중간 step의 population 출력 여부 |
-| `t2_li_ec_q0_m2_sp.gjf` | 환원 doublet. open-shell NPA alpha/beta block 형식, Loewdin spin 출력 형식 |
-| `t3_ec_co_stretch_bs_sp.gjf` | 고리 C–O를 늘인 BS singlet (`guess=mix`) |
-
-1. `iop(6/80=1)`이 Loewdin charge/spin을 출력하는지와 그 header 문구. 지금은 `Lowdin Atomic Charges` 형태로 가정함.
-2. open-shell NPA의 alpha/beta block 형식.
-3. opt 중간 step에 population이 출력되는지.
+- Loewdin: header는 `Lowdin Atomic Charges:`. open-shell에서도 charge만 출력하고 spin은 출력하지 않음 → open-shell `lowdin_spins`는 NaN.
+- NPA: total / Alpha / Beta block 형식 확인. NBO spin = α − β natural population. 합은 doublet 1.000, BS singlet 0.000.
+- opt: population은 첫 step과 수렴 후에만 출력됨. 중간 step의 charge와 spin은 NaN.
+- restricted closed-shell은 세 방식 모두 spin이 0.
+- 주의: def2-TZVPPD의 diffuse 함수 때문에 Mulliken/Loewdin 값이 basis에 따라 크게 바뀜.
+  - 예: Li⁰·EC의 Mulliken spin이 Li 1.499 (NBO 0.926).
+  - 예: Li+–EC의 Loewdin carbonyl O charge가 +0.09.
