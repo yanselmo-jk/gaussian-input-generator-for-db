@@ -49,3 +49,23 @@ def test_registry_dedup(tmp_path):
     assert registry.add(con, rec) == (sid, False)
     assert registry.set_status(con, sid, "parsed", "x.log")
     assert con.execute("SELECT status FROM structures").fetchone()[0] == "parsed"
+
+
+def test_parse_hangang_test_decks():
+    # test_decks/ t1-t3 run on Hangang (G16 c02, job 1212786, 2026-11-04): wB97XD/def2-TZVPPD, pop=npa, iop(6/80=1)
+    t1 = log_atoms(FIX.parent / "t1_li_ec_q1_m1_opt.log")      # R closed shell opt, charge +1
+    assert len(t1) == 8 and t1[-1].info["converged"]
+    for a in (t1[0], t1[-1]):                                  # populations on first and converged step only
+        for p in ("mulliken", "lowdin", "nbo"):
+            assert np.isclose(a.arrays[f"{p}_charges"].sum(), 1.0, atol=1e-3)
+            assert (a.arrays[f"{p}_spins"] == 0).all()        # restricted: spins are exactly 0
+    assert np.isnan(t1[3].arrays["nbo_charges"]).all()
+    t2 = log_atoms(FIX.parent / "t2_li_ec_q0_m2_sp.log")[0]    # U doublet
+    t3 = log_atoms(FIX.parent / "t3_ec_co_stretch_bs_sp.log")[0]  # U broken-symmetry singlet (guess=mix)
+    for a, nspin in ((t2, 1.0), (t3, 0.0)):
+        assert a.info["q_sum_ok"] and a.info["spin_sum_ok"]
+        assert np.isclose(a.arrays["nbo_spins"].sum(), nspin, atol=1e-3)
+        assert not np.isnan(a.arrays["lowdin_charges"]).any()
+        assert np.isnan(a.arrays["lowdin_spins"]).all()      # iop(6/80=1) prints no Lowdin spin for open shell
+    assert np.isclose(t2.arrays["nbo_spins"][0], 0.926, atol=1e-3)   # extra electron on Li (NPA)
+    assert np.isclose(t3.info["s2"], 0.3253) and np.abs(t3.arrays["nbo_spins"]).max() > 0.4  # symmetry broken
