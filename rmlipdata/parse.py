@@ -28,7 +28,7 @@ CHMULT = re.compile(r"Charge\s*=\s*(-?\d+)\s+Multiplicity\s*=\s*(\d+)")
 ROUTE = re.compile(r"\n -{10,}\n( #.*?)\n -{10,}\n", re.S)
 ROW = re.compile(rf"^\s*\d+\s+[A-Z][a-z]?\s+({NUM})(?:\s+({NUM}))?\s*$")
 MULLIKEN = re.compile(r"^ Mulliken charges( and spin densities)?:\s*$", re.M)
-# UNVERIFIED header text for iop(6/80=1); confirm on the test decks
+# header confirmed on G16 c02 (Hangang 2026-11-04): open shell prints charges only, no Lowdin spin
 LOWDIN = re.compile(r"^ Lowdin (?:Atomic )?Charges( and Spin Densities)?\s*:\s*$", re.M | re.I)
 NPA = re.compile(r"Summary of Natural Population Analysis:")
 NPA_ROW = re.compile(rf"^\s*[A-Z][a-z]?\s+\d+\s+({NUM})\s+{NUM}\s+{NUM}\s+{NUM}\s+({NUM})\s*$")
@@ -115,6 +115,8 @@ def parse_step(text):
         for key, pat in (("mulliken", MULLIKEN), ("lowdin", LOWDIN)):
             fr[key] = _pop(seg, pat, n, restricted)
         fr["nbo"] = _npa(seg, n)
+        if restricted and fr["nbo"] and fr["nbo"][1] is None:  # same rule as Mulliken/Loewdin
+            fr["nbo"] = (fr["nbo"][0], np.zeros(n))
         e, f, s2 = SCF.findall(seg), FORCES.search(seg), S2.findall(seg)
         if not e or not f:
             prev = frames[-1] if frames else None
