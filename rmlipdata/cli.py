@@ -4,6 +4,7 @@ import csv
 import os
 import re
 import sys
+import tempfile
 import zlib
 from pathlib import Path
 
@@ -11,8 +12,9 @@ import numpy as np
 import yaml
 from ase import Atoms
 from ase.io import write as ase_write
+from rdkit import Chem
 
-from . import build, g16, parse, registry, sample, species
+from . import build, g16, parse, registry, sample, species, xtb
 
 
 def _ctx(cfg, cat, out):
@@ -187,6 +189,65 @@ def export_cmd(db, out):
     con.close()
 
 
+def add_species_cmd(path, name, charge=None, kind=None, force=False):
+    try:
+        sp = species.add_user_species(path, name, charge=charge, kind=kind, force=force)
+    except ValueError as exc:  # user input problem: message, not a traceback
+        raise SystemExit(f"add-species: {exc}")
+    mol = Chem.MolFromMolFile(sp.molfile, removeHs=False)
+    formula = Atoms(symbols=[a.GetSymbol() for a in mol.GetAtoms()]).get_chemical_formula()
+    for key, val in (("name", sp.name), ("formula", formula), ("charge", sp.charge),
+                     ("kind", sp.kind), ("smiles", sp.smiles), ("path", sp.molfile)):
+        print(f"{key}: {val}")
+
+
+def species_cmd(kind=None, group=None):
+    cat = species.catalog()
+    rows = [sp for sp in cat.values()
+            if (kind is None or sp.kind == kind) and (group is None or sp.group == group)]
+    rows.sort(key=lambda sp: (sp.kind, sp.name))
+    cols = ("name", "kind", "charge", "n_atoms", "group", "smiles")
+    data = [{"name": sp.name, "kind": sp.kind, "charge": str(sp.charge),
+             "n_atoms": str(build.n_atoms(sp)), "group": sp.group, "smiles": sp.smiles}
+            for sp in rows]
+    width = {c: max([len(c)] + [len(r[c]) for r in data]) for c in cols}
+    print("  ".join(f"{c:<{width[c]}}" for c in cols))
+    for r in data:
+        print("  ".join(f"{r[c]:<{width[c]}}" for c in cols))
+    print(f"{len(data)} species")
+
+
+def view_cmd(name, opt=False, charge=None, save=None):
+    sp = species.catalog().get(name)
+    if sp is None:
+        raise SystemExit(f"unknown species: {name}")
+    charge = sp.charge if charge is None else int(charge)
+    if sp.molfile:
+        mol = Chem.MolFromMolFile(sp.molfile, removeHs=False)
+        if mol is None:
+            raise SystemExit(f"cannot read {sp.molfile}")
+    else:
+        mol = species.embed(sp.smiles)
+    symbols = [a.GetSymbol() for a in mol.GetAtoms()]
+    positions = np.zeros((1, 3)) if len(symbols) == 1 else mol.GetConformer().GetPositions()
+    if opt:
+        with tempfile.TemporaryDirectory() as d:
+            r = xtb.run_xtb(symbols, positions, charge, g16.n_electrons(symbols, charge) % 2, d, mode="opt")
+        if not r["ok"]:
+            raise SystemExit(f"xtb opt failed: {r.get('err', '')[:200]}")
+        positions = np.asarray(r["positions"], float)
+        print(f"xtb energy: {r['E_eV']:.6f} eV")
+    atoms = Atoms(symbols=symbols, positions=positions)
+    if save:
+        ase_write(save, atoms)
+        return
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        raise SystemExit("no display found. On WSL2 run: export DISPLAY=:0 (WSLg), "
+                         "over ssh use ssh -X, or use --save FILE.xyz")
+    from ase.visualize import view
+    view(atoms)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="rmd")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -208,6 +269,20 @@ def main(argv=None):
     e = sub.add_parser("export", help="registry rows to CSV")
     e.add_argument("--registry", required=True)
     e.add_argument("-o", required=True)
+    u = sub.add_parser("add-species", help="add a user species from .mol/.mol2/.xyz/.pdb")
+    u.add_argument("file")
+    u.add_argument("--name", required=True)
+    u.add_argument("--charge", type=int)
+    u.add_argument("--kind", choices=("anion", "solvent"))
+    u.add_argument("--force", action="store_true")
+    sp = sub.add_parser("species", help="list the species catalog")
+    sp.add_argument("--kind", choices=("cation", "anion", "solvent"))
+    sp.add_argument("--group")
+    v = sub.add_parser("view", help="show or save a species geometry")
+    v.add_argument("name")
+    v.add_argument("--opt", action="store_true")
+    v.add_argument("--charge", type=int)
+    v.add_argument("--save")
     a = p.parse_args(argv)
     if a.cmd == "generate":
         generate(yaml.safe_load(Path(a.config).read_text()), only=a.only, dry=a.dry)
@@ -217,6 +292,12 @@ def main(argv=None):
         status_cmd(a.registry)
     elif a.cmd == "resources":
         resources_cmd(a.registry, a.nproc, a.mem, a.sampler)
+    elif a.cmd == "add-species":
+        add_species_cmd(a.file, a.name, a.charge, a.kind, a.force)
+    elif a.cmd == "species":
+        species_cmd(a.kind, a.group)
+    elif a.cmd == "view":
+        view_cmd(a.name, a.opt, a.charge, a.save)
     else:
         export_cmd(a.registry, a.o)
     return 0

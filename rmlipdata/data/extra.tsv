@@ -10,6 +10,7 @@ CO2	O=C=O	0	solvent	gas
 CO	[C-]#[O+]	0	solvent	gas
 C2H4	C=C	0	solvent	gas
 H2	[H][H]	0	solvent	gas
+CH4	C	0	solvent	gas
 LiF	[Li]F	0	solvent	sei_inorganic
 LiOH	[Li]O	0	solvent	sei_inorganic
 Li2O	[Li]O[Li]	0	solvent	sei_inorganic
@@ -22,6 +23,10 @@ LEDC	[Li]OC(=O)OCCOC(=O)O[Li]	0	solvent	sei_organic
 LMC	[Li]OC(=O)OC	0	solvent	sei_organic
 LiOMe	[Li]OC	0	solvent	sei_organic
 LiOEt	[Li]OCC	0	solvent	sei_organic
+NEDC	[Na]OC(=O)OCCOC(=O)O[Na]	0	solvent	sei_organic
+NMC	[Na]OC(=O)OC	0	solvent	sei_organic
+NaOMe	[Na]OC	0	solvent	sei_organic
+NaOEt	[Na]OCC	0	solvent	sei_organic
 EC_ro	[CH2]COC(=O)[O-]	-1	anion	radical
 MeOCO2	COC(=O)[O]	0	solvent	radical
 CH3	[CH3]	0	solvent	radical
