@@ -9,7 +9,7 @@
 | column | 의미 |
 |---|---|
 | `id` | 구조 id (= `.gjf`/`.log` 파일명) |
-| `parent_id` | 부모 구조 id (현재 미사용) |
+| `parent_id` | vertical deck(같은 좌표, charge ±1)의 원래 deck id (최저 multiplicity deck). 그 밖에는 비어 있음 |
 | `sampler` | 만든 sampler |
 | `composition` | 구성 (예: `Li1 PF6_1 EC2`) |
 | `formula`, `n_atoms` | 화학식, 원자 수 |

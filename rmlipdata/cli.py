@@ -2,6 +2,7 @@
 import argparse
 import csv
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -74,8 +75,9 @@ def _stage(cfg, cat, out, dq, name, put):
     ctx.combos = _combos(cfg, cat)
     ctx.rng = np.random.default_rng(int(cfg.get("seed", 0)) + zlib.crc32(name.encode()))
     ctx.progress = lambda label: put(("unit", label, xtb.CALLS, xtb.HITS))
+    cap = int(cfg["samplers"][name].get("max_atoms", _max_atoms(cfg)))
     for rec in sample.SAMPLERS[name](ctx, cfg["samplers"][name], dq):
-        if len(rec["symbols"]) <= _max_atoms(cfg):
+        if len(rec["symbols"]) <= cap:
             put(("rec", rec))
 
 
@@ -124,14 +126,21 @@ def generate(cfg, only=None, dry=False):
     offsets = tuple(cfg.get("charge", {}).get("mult_offsets", (0, 2)))
     redox = float(cfg.get("charge", {}).get("redox_fraction", 1.0))
     high_spin = float(cfg.get("charge", {}).get("high_spin_fraction", 1.0))
+    vertical = float(cfg.get("charge", {}).get("vertical_fraction", 0.2))
+    dedup = float(cfg.get("limits", {}).get("dedup_A", 0.03))
+    qlo, qhi = cfg.get("charge", {}).get("range", (-2, 2))
     added = {n: 0 for n in names}
+    hsfrac = {n: float(cfg["samplers"][n].get("high_spin_fraction", high_spin)) for n in names}
+    dedup_dropped, seen = Counter(), {}
 
     dq_list = cfg.get("charge", {}).get("delta_q", [0])
     plan = _plan(cfg, cat, names)
     todo = [(i, dq, name) for i, (dq, name) in enumerate(((dq, n) for dq in dq_list for n in names), 1)]
     n_stages = len(todo)
-    extra = "".join(f", {k} {v:g}" for k, v in (("redox_fraction", redox), ("high_spin_fraction", high_spin))
-                    if v < 1.0)
+    extra = "".join(f", {k} {v:g}" for k, v in (("redox_fraction", redox), ("high_spin_fraction", high_spin),
+                                                ("vertical_fraction", vertical)) if v < 1.0)
+    if dedup:
+        extra += f", dedup_A {dedup:g}"
     for name in names:
         print(f"  {name}: {plan[name]} units x {len(dq_list)} delta_q{extra}", file=sys.stderr)
     print(f"{n_stages} stages (delta_q x sampler), {nmax} at a time, xtb threads {threads} each", file=sys.stderr)
@@ -164,29 +173,68 @@ def generate(cfg, only=None, dry=False):
         sys.stderr.write("\r" + status()[:w].ljust(w))
         sys.stderr.flush()
 
-    def add(name, rec, dq):
-        n = 0
+    def add(name, rec, dq, hsfrac):
         x = registry.make_id(rec["sampler"], rec["symbols"], rec["positions"], rec["charge"], 0, False,
                              rec["job"]).encode()
+        if dedup:
+            key = (name, int(dq), rec["composition"], rec["charge"], tuple(rec["symbols"]))
+            pos = np.asarray(rec["positions"], float)
+            idx = range(len(pos))
+            if any(np.linalg.norm(sample._kabsch(pos, ref, idx) - ref, axis=1).max() < dedup
+                   for ref in seen.get(key, ())):
+                dedup_dropped[name] += 1
+                return 0
+            seen.setdefault(key, []).append(pos)
         u = int(hashlib.sha1(x).hexdigest()[:8], 16) / 2 ** 32
         if int(dq) != 0 and u >= redox:
             return 0
-        states = g16.spin_states(rec["symbols"], rec["charge"], offsets=offsets, bs=rec["bs"])
-        low = min((mult for mult, _ in states), default=0)
         u_hs = int(hashlib.sha1(x + b"hs").hexdigest()[:8], 16) / 2 ** 32
-        for mult, bs in states:
-            if mult > low and not bs and u_hs >= high_spin:
-                continue
-            row = dict(rec, mult=mult, bs=bs, formula=Atoms(symbols=rec["symbols"]).get_chemical_formula())
-            sid, is_new = registry.add(con, row)
-            if is_new:
+
+        def emit(q, params, parent=None):
+            n, low_sid = 0, None
+            states = g16.spin_states(rec["symbols"], q, offsets=offsets, bs=rec["bs"])
+            low = min((mult for mult, _ in states), default=0)
+            for mult, bs in states:
+                if mult > low and not bs and u_hs >= hsfrac:
+                    continue
+                row = dict(rec, charge=q, mult=mult, bs=bs, params=params, parent_id=parent,
+                           formula=Atoms(symbols=rec["symbols"]).get_chemical_formula())
+                sid = registry.make_id(row["sampler"], row["symbols"], row["positions"], q, mult, bs, row["job"])
+                if low_sid is None or mult == low:
+                    low_sid = sid
+                if registry.gjf_path(con, sid):
+                    if parent is None:  # same deck reached as a vertical one first: the stage record wins
+                        con.execute("UPDATE structures SET parent_id=NULL, params=? WHERE id=? AND parent_id IS NOT NULL",
+                                    (json.dumps(params or {}), sid))
+                    continue  # deck already written by an earlier run
                 path = out / "gjf" / rec["job"] / name / f"{sid}.gjf"
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(g16.deck(rec["symbols"], rec["positions"], rec["charge"], mult, bs,
-                                         rec["job"], sid, nproc, mem, pop_always))
-                registry.set_gjf(con, sid, path)
+                tmp = path.with_name(path.name + ".tmp")
+                tmp.write_text(g16.deck(rec["symbols"], rec["positions"], q, mult, bs,
+                                        rec["job"], sid, nproc, mem, pop_always))
+                os.replace(tmp, path)  # deck first: a crash never leaves a registry row without its deck
+                row["gjf_path"] = str(path)
+                _, is_new = registry.add(con, row)
+                if not is_new:  # row from a crashed earlier run: fill in the deck path
+                    registry.set_gjf(con, sid, path)
                 added[name] += 1
                 n += 1
+            return n, low_sid
+
+        q0 = int(rec["charge"])
+        n, base = emit(q0, rec["params"])
+        if (rec["job"] != "sp" or vertical <= 0.0 or rec["params"].get("kind") == "cation"
+                or rec["params"].get("contact") == "rcov_sum"):
+            return n  # vertical decks only for geometries that depend on charge
+        u_v = int(hashlib.sha1(x + b"vert").hexdigest()[:8], 16) / 2 ** 32
+        if u_v >= vertical:
+            return n
+        symbols = rec["symbols"]
+        formal = q0 - int(dq)
+        if q0 - 1 >= max(qlo, -1) and abs(q0 - 1 - formal) <= 1 and any(s in ("Li", "Na") for s in symbols):
+            n += emit(q0 - 1, dict(rec["params"], vertical_dq=-1), base)[0]
+        if q0 + 1 <= qhi and abs(q0 + 1 - formal) <= 1 and any(s not in ("Li", "Na") for s in symbols):
+            n += emit(q0 + 1, dict(rec["params"], vertical_dq=1), base)[0]
         return n
 
     mp = multiprocessing.get_context("fork")  # children inherit catalog, config and monkeypatched samplers
@@ -218,7 +266,7 @@ def generate(cfg, only=None, dry=False):
                     s["label"], s["calls"], s["hits"] = rest
                     draw(force=True)
                 elif kind == "rec":
-                    n = add(s["name"], rest[0], s["dq"])
+                    n = add(s["name"], rest[0], s["dq"], hsfrac[s["name"]])
                     s["new"] += n
                     st["new"] += n
                     draw()
@@ -239,7 +287,8 @@ def generate(cfg, only=None, dry=False):
             manifest(con, out)
             for name in names:
                 total = con.execute("SELECT COUNT(*) FROM structures WHERE sampler=?", (name,)).fetchone()[0]
-                print(f"{name}: {added[name]} new, {total} total")
+                more = f", {dedup_dropped[name]} near-duplicates dropped" if dedup_dropped[name] else ""
+                print(f"{name}: {added[name]} new, {total} total{more}")
         finally:
             for p in running.values():
                 p.terminate()
@@ -283,11 +332,15 @@ def manifest(con, out):
     cols = ["id", "gjf_path", "sampler", "n_atoms", "charge", "mult", "bs", "job", "nproc", "mem"]
     rows = con.execute("SELECT " + ",".join(cols[:8]) + " FROM structures WHERE status='generated' "
                        "ORDER BY sampler, id").fetchall()
+    missing = [r for r in rows if not r["gjf_path"]]
+    if missing:
+        warnings.warn(f"manifest: skipped {len(missing)} row(s) without a deck (gjf_path NULL)")
     with open(Path(out) / "manifest.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(cols)
         for r in rows:
-            w.writerow([r[k] for k in cols[:8]] + list(_link0(r["gjf_path"])))
+            if r["gjf_path"]:
+                w.writerow([r[k] for k in cols[:8]] + list(_link0(r["gjf_path"])))
 
 
 def resources_cmd(db, nproc=None, mem=None, samplers=None):
@@ -448,7 +501,10 @@ def _display():
 def _gjf_info(path):
     """(id, charge, mult, bs) from a deck: title after the route's blank line, first 'q m' line, guess=mix."""
     lines = Path(path).read_text().splitlines()
-    start = next(i for i, l in enumerate(lines) if l.startswith("#"))
+    try:
+        start = next(i for i, l in enumerate(lines) if l.startswith("#"))
+    except StopIteration:
+        raise ValueError(f"{path}: no route line") from None
     gap = next(i for i in range(start, len(lines)) if not lines[i].strip())
     title = next(l.strip() for l in lines[gap + 1:] if l.strip())
     m = re.search(r"^-?\d+ \d+$", "\n".join(lines), re.M)
@@ -478,7 +534,10 @@ def view_cmd(targets, opt=False, charge=None, save=None):
     frames = []
     for i, path in enumerate(files):
         atoms = ase_read(path, format="gaussian-in")
-        title, q, mult, bs = _gjf_info(path)
+        try:
+            title, q, mult, bs = _gjf_info(path)
+        except ValueError as exc:  # deck without a route line: message, not a traceback
+            raise SystemExit(str(exc)) from None
         atoms.info.update(id=title, charge=q, spin=mult, bs=bs)
         print(f"{i}: id={title} charge={q} mult={mult} bs={bs} n_atoms={len(atoms)} {path}")
         frames.append(atoms)

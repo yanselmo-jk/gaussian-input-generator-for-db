@@ -38,6 +38,12 @@ def add(con, rec):
     return sid, cur.rowcount == 1
 
 
+def gjf_path(con, sid):
+    """Deck path of sid, or None if the row is missing or has no deck yet."""
+    row = con.execute("SELECT gjf_path FROM structures WHERE id=?", (sid,)).fetchone()
+    return row["gjf_path"] if row is not None else None
+
+
 def set_gjf(con, sid, path):
     con.execute("UPDATE structures SET gjf_path=? WHERE id=?", (str(path), sid))
 
