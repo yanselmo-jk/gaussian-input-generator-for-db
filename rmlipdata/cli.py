@@ -1,6 +1,7 @@
 """rmd command line: generate Gaussian16 decks from xTB-sampled geometries, parse logs, inspect the registry."""
 import argparse
 import csv
+import hashlib
 import os
 import re
 import shutil
@@ -52,6 +53,8 @@ def _plan(cfg, cat, names):
             plan[name] = len(sp)
         elif name == "pair_scan":
             plan[name] = min(npairs, int(scfg.get("max_pairs", npairs)))
+        elif name == "cluster_md":
+            plan[name] = min(len(sample.md_compositions(cfg, cat, scfg)), int(scfg.get("max_clusters", 20)))
         elif name == "cluster":
             plan[name] = len([c for c in combos if len(c) >= 2])
         else:
@@ -119,14 +122,18 @@ def generate(cfg, only=None, dry=False):
     nproc, mem = int(gcfg.get("nproc", 16)), gcfg.get("mem", "32GB")
     pop_always = bool(gcfg.get("pop_always", True))
     offsets = tuple(cfg.get("charge", {}).get("mult_offsets", (0, 2)))
+    redox = float(cfg.get("charge", {}).get("redox_fraction", 1.0))
+    high_spin = float(cfg.get("charge", {}).get("high_spin_fraction", 1.0))
     added = {n: 0 for n in names}
 
     dq_list = cfg.get("charge", {}).get("delta_q", [0])
     plan = _plan(cfg, cat, names)
     todo = [(i, dq, name) for i, (dq, name) in enumerate(((dq, n) for dq in dq_list for n in names), 1)]
     n_stages = len(todo)
+    extra = "".join(f", {k} {v:g}" for k, v in (("redox_fraction", redox), ("high_spin_fraction", high_spin))
+                    if v < 1.0)
     for name in names:
-        print(f"  {name}: {plan[name]} units x {len(dq_list)} delta_q", file=sys.stderr)
+        print(f"  {name}: {plan[name]} units x {len(dq_list)} delta_q{extra}", file=sys.stderr)
     print(f"{n_stages} stages (delta_q x sampler), {nmax} at a time, xtb threads {threads} each", file=sys.stderr)
 
     tty = sys.stderr.isatty()
@@ -157,13 +164,23 @@ def generate(cfg, only=None, dry=False):
         sys.stderr.write("\r" + status()[:w].ljust(w))
         sys.stderr.flush()
 
-    def add(name, rec):
+    def add(name, rec, dq):
         n = 0
-        for mult, bs in g16.spin_states(rec["symbols"], rec["charge"], offsets=offsets, bs=rec["bs"]):
+        x = registry.make_id(rec["sampler"], rec["symbols"], rec["positions"], rec["charge"], 0, False,
+                             rec["job"]).encode()
+        u = int(hashlib.sha1(x).hexdigest()[:8], 16) / 2 ** 32
+        if int(dq) != 0 and u >= redox:
+            return 0
+        states = g16.spin_states(rec["symbols"], rec["charge"], offsets=offsets, bs=rec["bs"])
+        low = min((mult for mult, _ in states), default=0)
+        u_hs = int(hashlib.sha1(x + b"hs").hexdigest()[:8], 16) / 2 ** 32
+        for mult, bs in states:
+            if mult > low and not bs and u_hs >= high_spin:
+                continue
             row = dict(rec, mult=mult, bs=bs, formula=Atoms(symbols=rec["symbols"]).get_chemical_formula())
             sid, is_new = registry.add(con, row)
             if is_new:
-                path = out / "gjf" / name / f"{sid}.gjf"
+                path = out / "gjf" / rec["job"] / name / f"{sid}.gjf"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(g16.deck(rec["symbols"], rec["positions"], rec["charge"], mult, bs,
                                          rec["job"], sid, nproc, mem, pop_always))
@@ -201,7 +218,7 @@ def generate(cfg, only=None, dry=False):
                     s["label"], s["calls"], s["hits"] = rest
                     draw(force=True)
                 elif kind == "rec":
-                    n = add(s["name"], rest[0])
+                    n = add(s["name"], rest[0], s["dq"])
                     s["new"] += n
                     st["new"] += n
                     draw()

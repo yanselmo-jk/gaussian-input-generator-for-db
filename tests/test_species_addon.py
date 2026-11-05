@@ -158,4 +158,5 @@ def test_generate_monomer_with_user_species(tmp_path):
     path = tmp_path / "cfg.yaml"
     path.write_text(yaml.safe_dump(cfg))
     assert cli.main(["generate", str(path)]) == 0
-    assert list((tmp_path / "run" / "gjf" / "monomer").glob("*.gjf"))
+    run = tmp_path / "run" / "gjf"
+    assert list((run / "sp" / "monomer").glob("*.gjf")) and list((run / "opt" / "monomer").glob("*.gjf"))

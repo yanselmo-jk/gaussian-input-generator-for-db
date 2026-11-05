@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 
 import numpy as np
 import yaml
@@ -18,9 +19,11 @@ TINY = {
     "samplers": {
         "monomer": {"on": True, "n_normal_mode": 1, "n_distort": 1, "T_K": 500, "max_structures": 4},
         "pair_scan": {"on": True, "max_pairs": 1, "n_orient": 1, "scales": [0.9, 1.5], "max_structures": 2},
-        "cluster": {"on": True, "n_distort": 1, "rattle_A": 0.1},
+        "cluster": {"on": True, "n_distort": 1, "rattle_A": [0.05, 0.15]},
+        "cluster_md": {"on": True, "n_solvent": [2], "with_anion": False, "T_K": [400], "time_ps": 0.6,
+                       "equil_ps": 0.1, "dump_fs": 50, "n_frames": 2, "max_clusters": 1},
         "bond_scan1": {"on": True, "n_points": 3, "max_bonds_per_cluster": 1, "bs": True, "max_structures": 3},
-        "bond_scan2": {"on": True, "n_points": 4, "max_bonds_per_cluster": 1, "bs": True, "max_structures": 3},
+        "bond_scan2": {"on": True, "n_points": 3, "max_bonds_per_cluster": 1, "bs": True, "max_structures": 3},
         "reaction": {"on": True, "templates": ["add", "substitute", "transfer"], "n_points": 3, "k_peak": 1,
                      "max_per_cluster": 1, "bs": True},
         "reaction2": {"on": True, "templates": ["ring_open_M"],
@@ -85,6 +88,27 @@ def test_reaction_candidates_radicals(tmp_path):
     assert {"radical_couple", "h_abstract"} <= {c[0] for c in sample._reaction_candidates(ctx, cl, combo)}
 
 
+def test_charge_radicals(tmp_path):
+    """delta_q != 0: the xtb charge difference marks EC atoms as radical sites; delta_q 0 adds none, and an
+    extra radical on EC with an H on another member gives an h_abstract candidate."""
+    import types
+    from rmlipdata import sample
+    cat = species.catalog()
+    combo = ["Li", "EC"]
+    cl = build.assemble(combo, cat, tmp_path, 0, np.random.default_rng(0))  # Li+EC at q=0 = delta_q -1
+    ctx = types.SimpleNamespace(cat=cat, workdir=tmp_path, cfg={}, rng=np.random.default_rng(0))
+    extra = sample._charge_radicals(ctx, cl, 0, -1)
+    ec = next(idxs for name, idxs in cl["members"] if name == "EC")
+    assert extra and all(i in ec and cl["symbols"][i] != "H" for i in extra)
+    assert sample._charge_radicals(ctx, cl, 0, 0) == []
+
+    combo3 = ["Li", "EC", "H2O"]
+    cl3 = build.assemble(combo3, cat, tmp_path, 0, np.random.default_rng(0))
+    extra3 = sample._charge_radicals(ctx, cl3, 0, -1)
+    assert extra3
+    assert "h_abstract" in {c[0] for c in sample._reaction_candidates(ctx, cl3, combo3, extra3)}
+
+
 def _manifest_rows(path):
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
@@ -101,11 +125,15 @@ def test_generate_end_to_end(tmp_path, capsys):
     db = tmp_path / "run" / "registry.sqlite"
     con = registry.connect(db)
     samplers = {r[0] for r in con.execute("SELECT DISTINCT sampler FROM structures")}
-    assert {"monomer", "pair_scan", "cluster", "bond_scan1", "bond_scan2", "reaction", "reaction2",
+    assert {"monomer", "pair_scan", "cluster", "cluster_md", "bond_scan1", "bond_scan2", "reaction", "reaction2",
             "hop"} <= samplers
     rows = con.execute("SELECT id, gjf_path, sampler, n_atoms, charge, mult, bs, job FROM structures "
                        "WHERE status='generated'").fetchall()
     assert rows and all(r["gjf_path"] and __import__("pathlib").Path(r["gjf_path"]).exists() for r in rows)
+    for r in rows:  # deck folders by job type: gjf/<job>/<sampler>/<id>.gjf
+        p = __import__("pathlib").Path(r["gjf_path"])
+        assert (p.parent.name, p.parent.parent.name, p.parent.parent.parent.name) == \
+            (r["sampler"], r["job"], "gjf")
     manifest = _manifest_rows(tmp_path / "run" / "manifest.csv")
     reg = {(r["id"], r["gjf_path"], r["sampler"], str(r["n_atoms"]), str(r["charge"]), str(r["mult"]),
             str(r["bs"]), r["job"]) for r in rows}
@@ -122,9 +150,17 @@ def test_generate_end_to_end(tmp_path, capsys):
     for sampler, key, allowed in (("hop", "path_dev_A", None), ("hop", "ref3", None),
                                   ("bond_scan2", "endpoint", {"xtb", "rigid"})):
         rows = con.execute("SELECT params FROM structures WHERE sampler=?", (sampler,)).fetchall()
-        assert rows and all(key in json.loads(r["params"]) for r in rows), (sampler, key)
+        params = [json.loads(r["params"]) for r in rows]
+        if sampler == "hop":
+            params = [p for p in params if p.get("kind") == "hop"]
+        assert params and all(key in p for p in params), (sampler, key)
         if allowed:
-            assert all(json.loads(r["params"])[key] in allowed for r in rows)
+            assert all(p[key] in allowed for p in params)
+    for sampler, kind in (("cluster", "dilate"), ("hop", "exchange_out")):
+        rows = con.execute("SELECT params FROM structures WHERE sampler=?", (sampler,)).fetchall()
+        assert any(json.loads(r["params"]).get("kind") == kind for r in rows), (sampler, kind)
+    rows = con.execute("SELECT params FROM structures WHERE sampler='bond_scan2'").fetchall()
+    assert any(json.loads(r["params"]).get("far") for r in rows)
     con.close()
 
     cfg1 = dict(cfg, out=str(tmp_path / "run1"), xtb=dict(TINY["xtb"], n_max_process=1))
@@ -138,9 +174,9 @@ def test_generate_end_to_end(tmp_path, capsys):
     assert ids1 == {r[0] for r in con.execute("SELECT id FROM structures")}
     con.close()
 
-    mono_dir = tmp_path / "run" / "gjf" / "monomer"
-    n_mono = len(list(mono_dir.glob("*.gjf")))
-    assert cli.main(["submit", str(mono_dir), "--registry", str(db)]) == 0
+    mono_dirs = sorted((tmp_path / "run" / "gjf").glob("*/monomer"))   # gjf/sp/monomer and gjf/opt/monomer
+    n_mono = sum(len(list(d.glob("*.gjf"))) for d in mono_dirs)
+    assert cli.main(["submit", *map(str, mono_dirs), "--registry", str(db)]) == 0
     with open(tmp_path / "run" / "manifest.csv", newline="") as f:
         assert not any(r["sampler"] == "monomer" for r in csv.DictReader(f))   # submitted: out of the manifest
     capsys.readouterr()
@@ -150,7 +186,7 @@ def test_generate_end_to_end(tmp_path, capsys):
     con = registry.connect(db)
     assert con.execute("SELECT COUNT(*) FROM structures WHERE status='submitted'").fetchone()[0] == n_mono
     con.close()
-    assert cli.main(["submit", str(mono_dir), "--registry", str(db), "--undo"]) == 0
+    assert cli.main(["submit", *map(str, mono_dirs), "--registry", str(db), "--undo"]) == 0
     assert cli.main(["resources", "--registry", str(db), "--nproc", "4", "--mem", "8GB",
                      "--sampler", "monomer"]) == 0
     with open(tmp_path / "run" / "manifest.csv", newline="") as f:
@@ -158,6 +194,47 @@ def test_generate_end_to_end(tmp_path, capsys):
     assert all((r["nproc"], r["mem"]) == (("4", "8GB") if r["sampler"] == "monomer" else ("1", "1GB")) for r in rows)
     mono = next(r for r in rows if r["sampler"] == "monomer")
     assert open(mono["gjf_path"]).read().startswith("%nprocshared=4\n%mem=8GB\n")
+
+
+def test_fraction_controls(tmp_path, monkeypatch):
+    """redox_fraction 0 drops every delta_q != 0 record; high_spin_fraction 0 drops non-BS decks above the
+    lowest multiplicity (the broken-symmetry singlet stays)."""
+    from ase.io import read
+    from rmlipdata import g16, sample
+    syms = ["O", "H", "H"]
+    base = np.array([[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]])
+
+    def fake(ctx, scfg, dq):
+        yield dict(symbols=syms, positions=base, charge=int(dq), sampler="fake", composition="H2O1",
+                   job="sp", bs=False, params={})
+        if int(dq) == 0:  # same formal charge, broken-symmetry record: its singlet deck must survive
+            yield dict(symbols=syms, positions=base + [0.05, 0.0, 0.0], charge=0, sampler="fake",
+                       composition="H2O1", job="sp", bs=True, params={})
+
+    monkeypatch.setitem(sample.SAMPLERS, "fake", fake)
+    cfg = dict(TINY, out=str(tmp_path / "run"),
+               charge=dict(TINY["charge"], delta_q=[0, -1], redox_fraction=0.0, high_spin_fraction=0.0),
+               samplers={"fake": {"on": True}})
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    assert cli.main(["generate", str(path)]) == 0
+
+    con = registry.connect(tmp_path / "run" / "registry.sqlite")
+    rows = con.execute("SELECT composition, charge, mult, bs, gjf_path FROM structures").fetchall()
+    con.close()
+    assert rows and all("/gjf/sp/fake/" in r["gjf_path"] for r in rows)
+    cat = species.catalog()
+    for r in rows:  # only delta_q 0 records: charge equals the formal charge of the composition
+        formal = sum(cat[m[1]].charge * int(m[2]) for m in
+                     (re.fullmatch(r"(.+?)_?(\d+)", tok) for tok in r["composition"].split()))
+        assert r["charge"] == formal, r
+    for r in rows:  # no non-BS deck above the lowest multiplicity
+        if r["bs"]:
+            continue
+        atoms = read(r["gjf_path"], format="gaussian-in")
+        mult = 1 if g16.n_electrons(atoms.get_chemical_symbols(), r["charge"]) % 2 == 0 else 2
+        assert r["mult"] == mult, r
+    assert any(r["bs"] and r["mult"] == 1 for r in rows)
 
 
 def test_sampler_guards():
@@ -179,6 +256,42 @@ def test_sampler_guards():
     pos = np.array([[0, 0, 0], [0, 0, 5.0]])
     moved = sample._shift_to(pos, [0], [1], np.array([0, 0, 1.0]), 1.5, 5.0)
     assert np.isclose(moved[1, 2], 1.5, atol=1e-6) and (moved[0] == 0).all()
+
+
+def test_cluster_dilation(monkeypatch):
+    """Dilation scales each member COM from the cluster COM and keeps the member geometry rigid."""
+    from types import SimpleNamespace
+    from rmlipdata import sample
+    pos = np.array([[0.0, 0.0, 0.0], [1.4, 0.0, 0.0],
+                    [-3.0, 0.8, 0.0], [-2.1, 0.8, 0.0], [-3.8, 0.8, 0.0]])
+    cl = {"symbols": ["C", "O", "C", "C", "O"], "positions": pos,
+          "members": [("EC", [0, 1]), ("CO2", [2, 3, 4])], "composition": "EC1 CO2_1"}
+    monkeypatch.setattr(sample, "_combos", lambda ctx: [("EC", "CO2")])
+    monkeypatch.setattr(sample, "_cluster", lambda ctx, combo, dq: (0, cl))
+    ctx = SimpleNamespace(cfg={}, cat=species.catalog(), workdir=None, rng=np.random.default_rng(0))
+    recs = list(sample.cluster(ctx, {"n_distort": 0, "dilate": [0.9, 1.5]}, 0))
+    assert [r["params"]["kind"] for r in recs] == ["opt", "dilate", "dilate"]
+    com = pos.mean(axis=0)
+    for rec in recs[1:]:
+        f, moved = rec["params"]["factor"], rec["positions"]
+        for _, idxs in cl["members"]:
+            assert np.isclose(np.linalg.norm(sample._com(moved, idxs) - com),
+                              f * np.linalg.norm(sample._com(pos, idxs) - com))
+            assert np.allclose(np.linalg.norm(moved[idxs][:, None] - moved[idxs][None], axis=-1),
+                               np.linalg.norm(pos[idxs][:, None] - pos[idxs][None], axis=-1))
+
+
+def test_maxmin_picks_diverse_frames():
+    """Greedy max-min RMSD: frame 0, then the frame farthest from it; rigid translations/rotations count as equal."""
+    from rmlipdata import sample
+    base = np.array([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [0.0, 1.5, 0.0]])
+    frames = [base + [0.0, 0.0, float(i)] for i in range(4)] + [base * 2.0]   # 0-3 identical, 4 expanded
+    assert sample._maxmin(frames, 2) == [0, 4]
+    assert sample._maxmin(frames, 1) == [0]
+    assert sorted(sample._maxmin(frames, 10)) == list(range(5))
+    assert sample._maxmin([], 3) == [] and sample._maxmin(frames, 0) == []
+    scaled = [base * s for s in (1.0, 2.0, 1.9, 1.5)]   # 1.9 is close to 2.0, so 1.5 is the third pick
+    assert sample._maxmin(scaled, 3) == [0, 1, 3]
 
 
 def test_bonds_ignore_li_na():
@@ -338,3 +451,12 @@ def test_reaction2_endpoint_check():
     assert sample._endpoint_check(sym, b0, moved, pairs, ranges)[0] == "rearranged"
     assert sample._endpoint_check(sym, sample._bonds(sym, coupled), coupled, pairs, ranges)[0] == \
         "already in the product state"
+
+
+def test_components_flag_detached_atom():
+    from rmlipdata import build, sample
+    sym = ["Li", "O", "H", "H", "H"]
+    pos = [[0, 0, 0], [1.9, 0, 0], [2.5, 0.75, 0], [2.5, -0.75, 0], [9.0, 0, 0]]
+    comps = sample._components(sym, pos)
+    assert sorted(map(sorted, comps)) == [[0], [1, 2, 3], [4]]
+    assert build.fragmented(pos, comps) and not build.fragmented(pos[:4], sample._components(sym[:4], pos[:4]))

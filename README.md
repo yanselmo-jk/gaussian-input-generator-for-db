@@ -19,7 +19,7 @@ xtb는 pip로 설치되지 않으므로 conda로 설치함. `pip`, `pytest` 대�
 
 ```bash
 rmd generate configs/example.yaml --dry     # 1. 생성될 대상 수 확인 (xtb 실행 안 함)
-rmd generate configs/example.yaml           # 2. 구조 생성 → runs/example/gjf/*.gjf
+rmd generate configs/example.yaml           # 2. 구조 생성 → runs/example/gjf/<sp|opt>/<sampler>/*.gjf
 #                                             3. runs/example/manifest.csv의 .gjf를 클러스터에 제출
 rmd submit runs/example/manifest.csv --registry runs/example/registry.sqlite   #    제출한 deck 표시 (manifest에서 빠짐)
 rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite   # 4. log → extxyz

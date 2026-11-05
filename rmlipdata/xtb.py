@@ -122,11 +122,11 @@ def build(rundir: Path, molecules: list[tuple[list[str], np.ndarray]], label: st
     return meta
 
 
-def _md_input(T: int, t_ps: float, R: float, restart: bool) -> str:
+def _md_input(T: int, t_ps: float, R: float, restart: bool, dump: float = DUMP_FS) -> str:
     return f"""$md
    temp={T}
    time={t_ps}
-   dump={DUMP_FS}
+   dump={dump}
    step=1.0
    hmass=2
    shake=0
@@ -146,6 +146,22 @@ def _read_scan_log(path: Path) -> tuple[list[float], list]:
     while k < len(lines) and lines[k].strip():
         n = int(lines[k])
         E.append(float(re.search(r"energy:\s*(-?\d+\.\d+)", lines[k + 1]).group(1)) * HA_EV)
+        frames.append([[float(v) for v in l.split()[1:4]] for l in lines[k + 2:k + 2 + n]])
+        k += n + 2
+    return E, frames
+
+
+def _read_trj(path: Path) -> tuple[list[float], list]:
+    """xtb.trj (multi-frame xyz) -> (energies in eV from the comment lines ([] when absent), frames)."""
+    lines, E, frames, k = path.read_text().splitlines(), [], [], 0
+    while k < len(lines):
+        if not lines[k].strip():
+            k += 1
+            continue
+        n = int(lines[k])
+        m = re.search(r"energy:\s*(-?\d+\.\d+)", lines[k + 1])
+        if m:
+            E.append(float(m.group(1)) * HA_EV)
         frames.append([[float(v) for v in l.split()[1:4]] for l in lines[k + 2:k + 2 + n]])
         k += n + 2
     return E, frames
@@ -187,17 +203,19 @@ def _xyz(symbols, positions):
 
 
 def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(), scan=None, fix=(), timeout=1800,
-            etemp=None):
-    """_run_xtb behind a result cache: the key is a sha1 of the exact xtb input (mol.xyz text, job.inp text, mode,
-    charge, uhf, etemp, xtb binary path and mtime), so a rerun gets the same structures without running xtb.
-    Only successful results are stored."""
+            etemp=None, md=None):
+    """_run_xtb behind a result cache: the key is a sha1 of the exact xtb input (mol.xyz text, job.inp / md.inp text,
+    mode, charge, uhf, etemp, xtb binary path and mtime), so a rerun gets the same structures without running xtb.
+    Only successful results are stored. md = dict(T_K, time_ps, dump_fs, wall_R_A) runs a gas-phase MD instead."""
     global HITS
     if not CACHE:
-        return _run_xtb(symbols, positions, charge, uhf, workdir, mode, constraints, scan, fix, timeout, etemp)
+        return _run_xtb(symbols, positions, charge, uhf, workdir, mode, constraints, scan, fix, timeout, etemp, md)
     exe = shutil.which("xtb") or ""
     stamp = os.stat(exe).st_mtime_ns if exe else 0
+    mdinp = _md_input(int(md["T_K"]), float(md["time_ps"]), float(md["wall_R_A"]), restart=False,
+                      dump=float(md["dump_fs"])) + "$samerand\n" if md else ""
     text = (f"{mode}|{charge}|{uhf}|{etemp}|{exe}|{stamp}|{_xyz(symbols, positions)}|"
-            f"{_input(list(constraints), scan, list(fix))}")
+            f"{_input(list(constraints), scan, list(fix))}|{mdinp}")
     key = hashlib.sha1(text.encode()).hexdigest()
     path = Path(CACHE) / key[:2] / f"{key}.pkl"
     if path.exists():
@@ -206,7 +224,7 @@ def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(),
         if out.get("etemp_K") and etemp is None:
             warnings.warn(f"xtb SCC did not converge (q={charge}, uhf={uhf}, {mode}); rerun with --etemp {ETEMP_RETRY_K}")
         return out
-    out = _run_xtb(symbols, positions, charge, uhf, workdir, mode, constraints, scan, fix, timeout, etemp)
+    out = _run_xtb(symbols, positions, charge, uhf, workdir, mode, constraints, scan, fix, timeout, etemp, md)
     if out["ok"]:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{key}.{os.getpid()}.tmp")
@@ -216,13 +234,15 @@ def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(),
 
 
 def _run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(), scan=None, fix=(), timeout=1800,
-             etemp=None):
+             etemp=None, md=None):
     """One GFN2 gas-phase job in a fresh temp dir under workdir, deleted afterwards. Never raises.
 
     mode: "sp" | "opt" | "hess"; scan = dict(n=int, ranges=[(r0, r1), ...]) implies an optimised scan over
-    the constraints in order. Returns {"ok", "E_eV", "positions" (opt), "frames"+"E_eV" (scan),
-    "hessian" (hess), "err"}. If the SCC does not converge (gas-phase radical anions, dianions, near-degenerate
-    states), the job is rerun once with Fermi smearing (--etemp 1000 K) and the result carries "etemp_K".
+    the constraints in order; md = dict(T_K, time_ps, dump_fs, wall_R_A) runs a $md + $wall MD instead.
+    Returns {"ok", "E_eV", "positions" (opt), "frames"+"E_eV" (scan/md), "hessian" (hess),
+    "charges" (sp/opt: per-atom partial charges), "err"}. If the SCC does not converge (gas-phase radical anions,
+    dianions, near-degenerate states), the job is rerun once with Fermi smearing (--etemp 1000 K) and the result
+    carries "etemp_K".
     """
     global CALLS
     CALLS += 1
@@ -234,7 +254,12 @@ def _run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=()
         (d / "mol.xyz").write_text(_xyz(symbols, positions))
         args = [find_xtb(), "mol.xyz", "--gfn", "2", "--chrg", str(charge), "--uhf", str(uhf)]
         inp = _input(list(constraints), scan, list(fix))
-        if inp:
+        if md:
+            # $samerand: fixed RNG seed, so the same step gives the same trajectories on a rerun (cache, test ids)
+            (d / "md.inp").write_text(_md_input(int(md["T_K"]), float(md["time_ps"]), float(md["wall_R_A"]),
+                                               restart=False, dump=float(md["dump_fs"])) + "$samerand\n")
+            args += ["--input", "md.inp", "--md"]
+        elif inp:
             (d / "job.inp").write_text(inp)
             args += ["--input", "job.inp"]
         if mode == "opt" or scan:
@@ -249,15 +274,33 @@ def _run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=()
         except subprocess.TimeoutExpired:
             return {"ok": False, "err": f"timeout after {timeout} s"}
         e = re.findall(r"TOTAL ENERGY\s+(-?\d+\.\d+) Eh", r.stdout)
-        if r.returncode or not e:
+        if md:
+            bad = r.returncode or not (d / "xtbmdok").exists() or "did not converge" in r.stdout \
+                or "MD is unstable" in r.stdout
+        else:
+            bad = r.returncode or not e
+        if bad:
             if etemp is None and SCC_FAIL in r.stdout:
                 warnings.warn(f"xtb SCC did not converge (q={charge}, uhf={uhf}, {mode}); rerun with --etemp {ETEMP_RETRY_K}")
                 return run_xtb(symbols, positions, charge, uhf, workdir, mode, constraints, scan, fix, timeout,
-                               etemp=ETEMP_RETRY_K)
+                               etemp=ETEMP_RETRY_K, md=md)
             return {"ok": False, "err": (r.stdout + r.stderr)[-400:]}
-        out = {"ok": True, "E_eV": float(e[-1]) * HA_EV}
+        out = {"ok": True, "E_eV": float(e[-1]) * HA_EV if e else None}
         if etemp:
             out["etemp_K"] = etemp
+        if mode in ("sp", "opt") and (d / "charges").exists():
+            try:
+                ch = [float(v) for v in (d / "charges").read_text().split()]
+                if len(ch) == len(symbols):
+                    out["charges"] = ch
+            except ValueError:
+                pass  # malformed file: charges stay unknown
+        if md:
+            if not (d / "xtb.trj").exists():
+                return {"ok": False, "err": "no xtb.trj"}
+            E, frames = _read_trj(d / "xtb.trj")
+            out["frames"] = frames
+            out["E_eV"] = E or [out["E_eV"]]  # no energies in the comment lines: the final total energy
         if scan:
             if not (d / "xtbscan.log").exists():
                 return {"ok": False, "err": "no xtbscan.log"}

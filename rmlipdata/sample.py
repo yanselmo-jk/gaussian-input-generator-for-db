@@ -195,6 +195,23 @@ def _bonds(symbols, positions, atoms=None, scale=1.2):
     return out
 
 
+def _components(symbols, positions):
+    """Covalently connected atom groups (per _bonds); Li/Na are single-atom groups."""
+    parent = list(range(len(symbols)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, j in _bonds(symbols, positions):
+        parent[root(i)] = root(j)
+    groups = {}
+    for i in range(len(symbols)):
+        groups.setdefault(root(i), []).append(i)
+    return list(groups.values())
+
+
 def _com(pos, idx):
     return pos[list(idx)].mean(axis=0)
 
@@ -389,7 +406,7 @@ def pair_scan(ctx, scfg, delta_q):
 
 
 def cluster(ctx, scfg, delta_q):
-    """Assembled cluster opt + Gaussian-rattled sp frames."""
+    """Assembled cluster opt + Gaussian-rattled sp frames + rigid member dilations."""
     n = 0
     for combo in _combos(ctx):
         if len(combo) < 2 or n >= _limit(scfg):
@@ -401,14 +418,40 @@ def cluster(ctx, scfg, delta_q):
         yield _rec(ctx, cl["symbols"], cl["positions"], q, "cluster", combo, "opt", False,
                    {"combo": list(combo), "kind": "opt"} | _etemp(cl))
         n += 1
-        for k in range(int(scfg.get("n_distort", 0))):
+        rattle = scfg.get("rattle_A", 0.05)
+        sigmas = rattle if isinstance(rattle, (list, tuple)) else [rattle]
+        k = 0
+        for sigma in sigmas:
+            for _ in range(int(scfg.get("n_distort", 0))):
+                if n >= _limit(scfg):
+                    return
+                pos = _rattle(cl["positions"], float(sigma), ctx.rng)
+                if pos is None:
+                    continue
+                yield _rec(ctx, cl["symbols"], pos, q, "cluster", combo, "sp", False,
+                           {"combo": list(combo), "kind": "distort", "index": k,
+                            "sigma_A": float(sigma)} | _etemp(cl))
+                n += 1
+                k += 1
+        if len(cl["members"]) < 2:
+            continue
+        rcov = np.array([_cov(cl["symbols"], i) for i in range(len(cl["symbols"]))])
+        member_of = np.empty(len(cl["symbols"]), int)
+        for m, (_, idxs) in enumerate(cl["members"]):
+            member_of[idxs] = m
+        com = cl["positions"].mean(axis=0)
+        for f in scfg.get("dilate", [0.9, 1.1, 1.25]):
             if n >= _limit(scfg):
                 return
-            pos = _rattle(cl["positions"], float(scfg.get("rattle_A", 0.05)), ctx.rng)
-            if pos is None:
-                continue
-            yield _rec(ctx, cl["symbols"], pos, q, "cluster", combo, "sp", False,
-                       {"combo": list(combo), "kind": "distort", "index": k} | _etemp(cl))
+            moved = cl["positions"].copy()
+            for _, idxs in cl["members"]:
+                moved[idxs] += (float(f) - 1.0) * (_com(cl["positions"], idxs) - com)
+            d = np.linalg.norm(moved[:, None] - moved[None], axis=-1)
+            other = member_of[:, None] != member_of[None]
+            if (d[other] < 0.7 * (rcov[:, None] + rcov[None])[other]).any():
+                continue  # rigid dilation pushed two members into each other
+            yield _rec(ctx, cl["symbols"], moved, q, "cluster", combo, "sp", False,
+                       {"combo": list(combo), "kind": "dilate", "factor": float(f)} | _etemp(cl))
             n += 1
 
 
@@ -563,6 +606,31 @@ def bond_scan2(ctx, scfg, delta_q):
                             "endpoint": endpoint}
                            | ({"E_xtb_end_eV": float(r["E_eV"])} if endpoint == "xtb" else {}) | _etemp(cl, r))
                 n += 1
+            if not mol.GetBondBetweenAtoms(li, lj).IsInRing():  # far points off a ring bond are meaningless
+                vec = end[j] - end[i]
+                d_end = float(np.linalg.norm(vec))
+                if d_end < 1e-8:
+                    continue
+                for k, dist in enumerate([float(v) for v in scfg.get("far_A", [4.0, 5.0]) if float(v) > d_end],
+                                         len(images)):
+                    if n >= _limit(scfg):
+                        return
+                    x = end.copy()
+                    x[side] += (dist - d_end) * vec / d_end  # j-side fragment moved rigidly along i->j
+                    d = np.linalg.norm(x[:, None] - x[None], axis=2) + np.eye(len(x)) * 1e9
+                    if (d < 0.7 * (rcov[:, None] + rcov[None])).any():
+                        continue  # far point pushed two atoms together
+                    if any(np.linalg.norm(x[a] - x[b]) > 1.3 * np.linalg.norm(pos[a] - pos[b])
+                           for a, b in bonds if (a, b) != key):
+                        continue  # far point tore another bond
+                    if _bonds(symbols, x) - bonds:
+                        continue  # far point bonded the moved fragment to a spectator
+                    yield _rec(ctx, symbols, x, q, "bond_scan2", combo, "sp", bs,
+                               {"bond": [i, j], "elements": [symbols[i], symbols[j]], "method": "far",
+                                "r_A": float(np.linalg.norm(x[i] - x[j])), "index": k,
+                                "ring": False, "endpoint": endpoint, "far": True}
+                               | ({"E_xtb_end_eV": float(r["E_eV"])} if endpoint == "xtb" else {}) | _etemp(cl, r))
+                    n += 1
 
 
 def _electrophiles(mol):
@@ -584,12 +652,16 @@ def _carbonyl_oxygens(mol, c):
             if b.GetBondType() == Chem.BondType.DOUBLE and b.GetOtherAtom(mol.GetAtomWithIdx(c)).GetSymbol() == "O"}
 
 
-def _reaction_candidates(ctx, cl, combo):
-    """[(template, pairs, ranges)] over member pairs within 6 A; pairs[k] carries ranges[k] = (start, target)."""
+def _reaction_candidates(ctx, cl, combo, extra_radicals=()):
+    """[(template, pairs, ranges)] over member pairs within 6 A; pairs[k] carries ranges[k] = (start, target).
+    extra_radicals: cluster atoms to treat as radical centres (charge-derived, see _charge_radicals)."""
     infos, cat_infos = [], []
+    xr = set(extra_radicals)
     for (name, idxs), (_, mol) in zip(cl["members"], _mols(ctx, combo)):
-        (cat_infos if ctx.cat[name].kind == "cation" else infos).append(
-            dict(name=name, idxs=idxs, mol=mol))
+        info = dict(name=name, idxs=idxs, mol=mol,
+                    rad=list(dict.fromkeys([idxs[i] for i in _radical_atoms(mol)]
+                                           + [k for k in idxs if k in xr])))
+        (cat_infos if ctx.cat[name].kind == "cation" else infos).append(info)
     pos = cl["positions"]
     rcov = np.array([_cov(cl["symbols"], k) for k in range(len(cl["symbols"]))])
     cand = []
@@ -666,19 +738,19 @@ def _reaction_candidates(ctx, cl, combo):
                         cand.append(("transfer", [(y, x), (z, x)], [(rxy, tgt), (dz, ztgt)]))
     # radical_couple: two radical centres of different members
     for ai, a in enumerate(infos):
-        ra = [a["idxs"][i] for i in _radical_atoms(a["mol"])]
+        ra = a["rad"]
         if not ra:
             continue
         for b in infos[ai + 1:]:
             if np.linalg.norm(_com(pos, a["idxs"]) - _com(pos, b["idxs"])) > 6.0:
                 continue
             for i in ra:
-                for j in [b["idxs"][k] for k in _radical_atoms(b["mol"])]:
+                for j in b["rad"]:
                     d0 = float(np.linalg.norm(pos[i] - pos[j]))
                     cand.append(("radical_couple", [(i, j)], [(d0, 1.05 * (rcov[i] + rcov[j]))]))
     # h_abstract: a radical centre of A takes an H bonded to Y of a different member B
     for a in infos:
-        ra = [a["idxs"][i] for i in _radical_atoms(a["mol"])]
+        ra = a["rad"]
         if not ra:
             continue
         for b in infos:
@@ -736,6 +808,29 @@ def _pick(cand, k, rng):
     return out
 
 
+def _charge_radicals(ctx, cl, q, delta_q):
+    """Cluster atoms whose xtb charge shifted most between q and q - delta_q, when the q state is a radical.
+
+    Reduction (delta_q < 0) picks atoms that gained electron density (delta <= -0.15), oxidation (delta_q > 0)
+    atoms that lost it (delta >= +0.15); heavy atoms of non-cation members only, up to 2, most |delta| first.
+    The SMILES of a delta_q != 0 cluster has no radical marked, so these are its radical sites."""
+    dq = int(delta_q)
+    if dq == 0 or n_electrons(cl["symbols"], q) % 2 == 0:
+        return []
+    q0 = int(q) - dq
+    r1 = xtb.run_xtb(cl["symbols"], cl["positions"], q, _uhf(cl["symbols"], q), ctx.workdir, mode="sp",
+                     timeout=_timeout(ctx))
+    r0 = xtb.run_xtb(cl["symbols"], cl["positions"], q0, _uhf(cl["symbols"], q0), ctx.workdir, mode="sp",
+                     timeout=_timeout(ctx))
+    if "charges" not in r1 or "charges" not in r0:
+        return []  # older cached run or failed sp: radical sites unknown
+    d = np.asarray(r1["charges"], float) - np.asarray(r0["charges"], float)
+    cand = [i for name, idxs in cl["members"] if ctx.cat[name].kind != "cation"
+            for i in idxs if cl["symbols"][i] not in ("H", "Li", "Na")  # Li/Na: ionic, not a radical centre
+            and (d[i] <= -0.15 if dq < 0 else d[i] >= 0.15)]
+    return sorted(cand, key=lambda i: -abs(d[i]))[:2]
+
+
 def reaction(ctx, scfg, delta_q):
     """Pseudo-TS reaction paths (add / substitute / transfer): scan, keep the energy peak +/- k_peak."""
     bs = bool(scfg.get("bs", False))
@@ -749,7 +844,8 @@ def reaction(ctx, scfg, delta_q):
         q, cl = _cluster(ctx, combo, delta_q)
         if cl is None:
             continue
-        cand = [c for c in _reaction_candidates(ctx, cl, combo) if c[0] in templates]
+        extra = _charge_radicals(ctx, cl, q, delta_q)
+        cand = [c for c in _reaction_candidates(ctx, cl, combo, extra) if c[0] in templates]
         cand = _pick(cand, max_per, ctx.rng)
         for template, pairs, ranges in cand:
             if n >= _limit(scfg):
@@ -772,7 +868,7 @@ def reaction(ctx, scfg, delta_q):
                            {"template": template, "atoms": atoms, "pairs": [list(x) for x in pairs],
                             "ranges": [list(x) for x in ranges],
                             "index": int(k), "peak_index": int(p), "is_peak": bool(k == p),
-                            "E_xtb_eV": float(E[k])} | _etemp(cl, r))
+                            "charge_radicals": list(extra), "E_xtb_eV": float(E[k])} | _etemp(cl, r))
                 n += 1
 
 
@@ -823,7 +919,8 @@ def reaction2(ctx, scfg, delta_q):
         rcov = np.array([_cov(symbols, k) for k in range(len(symbols))])
         members = [ix for _, ix in cl["members"]]
         b0 = _bonds(symbols, pos)
-        cand = [c for c in _reaction_candidates(ctx, cl, combo) if c[0] in templates]
+        extra = _charge_radicals(ctx, cl, q, delta_q)
+        cand = [c for c in _reaction_candidates(ctx, cl, combo, extra) if c[0] in templates]
         cand = _pick(cand, max_per, ctx.rng)
         for template, pairs, ranges in cand:
             if n >= _limit(scfg):
@@ -864,7 +961,8 @@ def reaction2(ctx, scfg, delta_q):
                     continue  # a surviving bond stretched far beyond its cluster length
                 yield _rec(ctx, symbols, x, q, "reaction2", combo, "sp", bs,
                            {"template": template, "atoms": atoms, "pairs": [list(p) for p in pairs],
-                            "index": k, "endpoint": endpoint, "E_xtb_end_eV": float(r["E_eV"])}
+                            "index": k, "endpoint": endpoint, "charge_radicals": list(extra),
+                            "E_xtb_end_eV": float(r["E_eV"])}
                            | _etemp(cl, r))
                 n += 1
 
@@ -950,11 +1048,137 @@ def hop(ctx, scfg, delta_q):
                     if (dm < 0.75 * (rcov[m] + rcov[rest])).any():
                         continue  # cation runs into an atom: no useful PES point
                     yield _rec(ctx, symbols, cur, q, "hop", combo, "sp", False,
-                               {"cation": cation, "cation_index": int(m), "from_donor": d1, "to_donor": int(d2), "t": float(t),
+                               {"kind": "hop", "cation": cation, "cation_index": int(m), "from_donor": d1,
+                                "to_donor": int(d2), "t": float(t),
                                 "d_from_A": float(np.linalg.norm(cur[m] - cur[d1])),
                                 "d_to_A": float(np.linalg.norm(cur[m] - cur[d2])),
                                 "path_dev_A": dev, "ref3": r3} | _etemp(cl, r))
                     n += 1
+        if bool(scfg.get("exchange", True)):
+            emax = int(scfg.get("exchange_max_per_cluster", 2))
+            ext = float(scfg.get("exchange_extend_A", 3.0))
+            pairs = [(cidx[0], i) for c, cidx in cl["members"] if ctx.cat[c].kind == "cation"
+                     for name, idxs in cl["members"] if ctx.cat[name].kind != "cation"
+                     for i in idxs if symbols[i] in DONORS and np.linalg.norm(pos[cidx[0]] - pos[i]) <= 2.6]
+            if len(pairs) > emax:
+                pairs = [pairs[i] for i in ctx.rng.permutation(len(pairs))[:emax]]
+            for m, d in pairs:
+                if n >= _limit(scfg):
+                    return
+                r0 = float(np.linalg.norm(pos[m] - pos[d]))
+                r = xtb.run_xtb(symbols, pos, q, _uhf(symbols, q), ctx.workdir, mode="sp",
+                                constraints=[(m, d, r0)], scan=dict(n=npts, ranges=[(r0, r0 + ext)]),
+                                timeout=_timeout(ctx))
+                if not r.get("ok"):
+                    continue
+                kmax = min(_until_jump(r["E_eV"]), _until_apart(cl, r["frames"]))
+                for k, (frame, energy) in enumerate(zip(r["frames"][:kmax], r["E_eV"][:kmax])):
+                    if n >= _limit(scfg):
+                        return
+                    frame = np.asarray(frame, float)
+                    others = [k2 for k2 in range(len(symbols)) if k2 != m]
+                    if (np.linalg.norm(frame[others] - frame[m], axis=1)
+                            < 0.75 * (_cov(symbols, m) + np.array([_cov(symbols, k2) for k2 in others]))).any():
+                        continue  # cation runs into an atom, as in the hop guard
+                    yield _rec(ctx, symbols, frame, q, "hop", combo, "sp", False,
+                               {"kind": "exchange_out", "cation_index": int(m), "donor": int(d),
+                                "r_A": float(np.linalg.norm(frame[m] - frame[d])), "index": k,
+                                "E_xtb_eV": float(energy)} | _etemp(cl, r))
+                    n += 1
+
+
+def _rmsd(x, ref):
+    """All-atom RMSD (A) of x after Kabsch alignment onto ref."""
+    idx = list(range(len(ref)))
+    moved = _kabsch(np.asarray(x, float), np.asarray(ref, float), idx)
+    return float(np.sqrt(((moved - np.asarray(ref, float)) ** 2).sum(axis=1).mean()))
+
+
+def _maxmin(frames, k):
+    """Indices of up to k frames picked by greedy max-min RMSD: start from frame 0, then repeatedly add the frame
+    whose minimum RMSD to the already picked frames is largest."""
+    picked = [0] if frames and k > 0 else []
+    while len(picked) < min(int(k), len(frames)):
+        best, bi = -1.0, None
+        for j in range(len(frames)):
+            if j in picked:
+                continue
+            d = min(_rmsd(frames[j], frames[i]) for i in picked)
+            if d > best:
+                best, bi = d, j
+        picked.append(bi)
+    return picked
+
+
+def md_compositions(cfg, cat, scfg):
+    """cluster_md compositions: cation + n solvents (+ one anion replacing a solvent), within limits.max_atoms."""
+    sp = cfg["species"]
+    max_atoms = int(cfg.get("limits", {}).get("max_atoms", 10 ** 9))
+    names_all = []
+    for c in sp.get("cations", []):
+        for s in sp.get("solvents", []):
+            for n in scfg.get("n_solvent", [4]):
+                cand = [[c] + [s] * int(n)]
+                if scfg.get("with_anion", True):
+                    cand += [[c] + [s] * (int(n) - 1) + [a] for a in sp.get("anions", [])]
+                for nm in cand:
+                    if sum(build.n_atoms(cat[x]) for x in nm) <= max_atoms:
+                        names_all.append(nm)
+    return names_all
+
+
+def cluster_md(ctx, scfg, delta_q):
+    """First-solvation-shell clusters: xTB MD at several temperatures, frames picked by greedy max-min RMSD."""
+    names_all = md_compositions(ctx.cfg, ctx.cat, scfg)
+    kmax = int(scfg.get("max_clusters", 20))
+    if len(names_all) > kmax:
+        names_all = [names_all[i] for i in ctx.rng.permutation(len(names_all))[:kmax]]
+    T_K = [int(T) for T in scfg.get("T_K", [300, 450, 600])]
+    time_ps = float(scfg.get("time_ps", 10))
+    dump_fs = float(scfg.get("dump_fs", 50))
+    equil_ps = float(scfg.get("equil_ps", 2))
+    n_frames = int(scfg.get("n_frames", 10))
+    n = 0
+    for names in names_all:
+        getattr(ctx, "progress", lambda *a: None)(build.composition(names))
+        q = _formal(ctx, names) + int(delta_q)
+        if not _q_ok(ctx, q):
+            continue
+        cl = build.assemble(names, ctx.cat, ctx.workdir, q,
+                            np.random.default_rng(int(ctx.cfg.get("seed", 0)) + zlib.crc32(f"md{names}{q}".encode())))
+        members = [idx for _, idx in cl["members"]]
+        if build.fragmented(cl["positions"], members):
+            warnings.warn(f"cluster_md {names} q={q} fell apart in the xtb opt; skipped")
+            continue
+        symbols, pos = cl["symbols"], np.asarray(cl["positions"], float)
+        pos = pos - pos.mean(axis=0)  # the xtb wall sphere is centred at the origin
+        R = float(np.linalg.norm(pos, axis=1).max()) + 2.0
+        rcov = np.array([_cov(symbols, i) for i in range(len(symbols))])
+        close = 0.6 * (rcov[:, None] + rcov[None])
+        skip = int(np.ceil(equil_ps / (dump_fs / 1000.0)))
+        for T in T_K:
+            r = xtb.run_xtb(symbols, pos, q, _uhf(symbols, q), ctx.workdir, timeout=_timeout(ctx),
+                            md=dict(T_K=T, time_ps=time_ps, dump_fs=dump_fs, wall_R_A=R))
+            if not (r.get("ok") and r.get("frames")):
+                err = (str(r.get("err") or "no frames").strip().splitlines() or ["?"])[-1]
+                warnings.warn(f"cluster_md {list(names)} q={q} T={T}: xtb md failed ({err}); skipped")
+                continue
+            raw = [np.asarray(f, float) for f in r["frames"]]
+            idx = [k for k in range(skip, len(raw))
+                   if not build.fragmented(raw[k], members)
+                   and not build.fragmented(raw[k], _components(symbols, raw[k]))
+                   and not (np.linalg.norm(raw[k][:, None] - raw[k][None], axis=2)
+                            + np.eye(len(symbols)) * 1e9 < close).any()]
+            cand = [raw[k] for k in idx]
+            picked = _maxmin(cand, n_frames)
+            for j, p in enumerate(picked):
+                if n >= _limit(scfg):
+                    return
+                n += 1
+                rmsd = None if j == 0 else min(_rmsd(cand[p], cand[h]) for h in picked[:j])
+                yield _rec(ctx, symbols, cand[p], q, "cluster_md", names, "sp", False,
+                           {"T_K": float(T), "frame": int(idx[p]), "rmsd_min_A": rmsd, "names": list(names)}
+                           | _etemp(r))
 
 
 def nanoreactor(ctx, scfg, delta_q):
@@ -985,5 +1209,5 @@ def nanoreactor(ctx, scfg, delta_q):
             n += 1
 
 
-SAMPLERS = {"monomer": monomer, "pair_scan": pair_scan, "cluster": cluster, "bond_scan1": bond_scan1, "bond_scan2": bond_scan2,
+SAMPLERS = {"monomer": monomer, "pair_scan": pair_scan, "cluster": cluster, "cluster_md": cluster_md, "bond_scan1": bond_scan1, "bond_scan2": bond_scan2,
             "reaction": reaction, "reaction2": reaction2, "hop": hop, "nanoreactor": nanoreactor}
