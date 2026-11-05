@@ -1,4 +1,5 @@
 import csv
+import json
 
 import numpy as np
 import yaml
@@ -22,6 +23,8 @@ TINY = {
         "bond_scan2": {"on": True, "n_points": 4, "max_bonds_per_cluster": 1, "bs": True, "max_structures": 3},
         "reaction": {"on": True, "templates": ["add", "substitute", "transfer"], "n_points": 3, "k_peak": 1,
                      "max_per_cluster": 1, "bs": True},
+        "reaction2": {"on": True, "templates": ["ring_open_M"],
+                      "n_points": 4, "max_per_cluster": 4, "bs": True},
         "hop": {"on": True, "n_points": 3, "max_per_cluster": 1},
         "nanoreactor": {"on": False, "T_K": 1500, "ncyc": 2, "every_n_frames": 50},
     },
@@ -58,6 +61,30 @@ def test_assemble_li_ec(tmp_path):
     assert min(d) < 2.3
 
 
+def test_reaction_candidates_li_ec(tmp_path):
+    """Li+EC: ring_open_M and intra_shift candidates; every pair has exactly one range."""
+    import types
+    from rmlipdata import sample
+    cat = species.catalog()
+    combo = ["Li", "EC"]
+    cl = build.assemble(combo, cat, tmp_path, 1, np.random.default_rng(0))
+    ctx = types.SimpleNamespace(cat=cat, workdir=tmp_path, cfg={}, rng=np.random.default_rng(0))
+    cand = sample._reaction_candidates(ctx, cl, combo)
+    assert {"ring_open_M", "intra_shift"} <= {c[0] for c in cand}
+    assert all(len(pairs) == len(ranges) for _, pairs, ranges in cand)
+
+
+def test_reaction_candidates_radicals(tmp_path):
+    """Two radical members give radical_couple; a radical taking a neighbour's H gives h_abstract."""
+    import types
+    from rmlipdata import sample
+    cat = species.catalog()
+    combo = ["CH3", "CH3O"]
+    cl = build.assemble(combo, cat, tmp_path, 0, np.random.default_rng(0))
+    ctx = types.SimpleNamespace(cat=cat, workdir=tmp_path, cfg={}, rng=np.random.default_rng(0))
+    assert {"radical_couple", "h_abstract"} <= {c[0] for c in sample._reaction_candidates(ctx, cl, combo)}
+
+
 def _manifest_rows(path):
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
@@ -74,7 +101,8 @@ def test_generate_end_to_end(tmp_path, capsys):
     db = tmp_path / "run" / "registry.sqlite"
     con = registry.connect(db)
     samplers = {r[0] for r in con.execute("SELECT DISTINCT sampler FROM structures")}
-    assert {"monomer", "pair_scan", "cluster", "bond_scan1", "bond_scan2", "reaction", "hop"} <= samplers
+    assert {"monomer", "pair_scan", "cluster", "bond_scan1", "bond_scan2", "reaction", "reaction2",
+            "hop"} <= samplers
     rows = con.execute("SELECT id, gjf_path, sampler, n_atoms, charge, mult, bs, job FROM structures "
                        "WHERE status='generated'").fetchall()
     assert rows and all(r["gjf_path"] and __import__("pathlib").Path(r["gjf_path"]).exists() for r in rows)
@@ -91,6 +119,12 @@ def test_generate_end_to_end(tmp_path, capsys):
     assert sum(int(n) for n in __import__("re").findall(r"\(cached (\d+)\), ", err)) > 0
     con = registry.connect(db)
     assert con.execute("SELECT COUNT(*) FROM structures").fetchone()[0] == n_before
+    for sampler, key, allowed in (("hop", "path_dev_A", None), ("hop", "ref3", None),
+                                  ("bond_scan2", "endpoint", {"xtb", "rigid"})):
+        rows = con.execute("SELECT params FROM structures WHERE sampler=?", (sampler,)).fetchall()
+        assert rows and all(key in json.loads(r["params"]) for r in rows), (sampler, key)
+        if allowed:
+            assert all(json.loads(r["params"])[key] in allowed for r in rows)
     con.close()
 
     cfg1 = dict(cfg, out=str(tmp_path / "run1"), xtb=dict(TINY["xtb"], n_max_process=1))
@@ -145,6 +179,59 @@ def test_sampler_guards():
     pos = np.array([[0, 0, 0], [0, 0, 5.0]])
     moved = sample._shift_to(pos, [0], [1], np.array([0, 0, 1.0]), 1.5, 5.0)
     assert np.isclose(moved[1, 2], 1.5, atol=1e-6) and (moved[0] == 0).all()
+
+
+def test_bonds_ignore_li_na():
+    from rmlipdata import sample
+    pos = np.array([[0.0, 0.0, 0.0], [1.4, 0.0, 0.0], [0.0, 0.0, 1.9], [0.0, 0.0, 10.0]])
+    assert sample._bonds(["C", "O", "Li", "Na"], pos) == {(0, 1)}
+
+
+def test_pair_scan_bonded_members(tmp_path, monkeypatch):
+    """A1: an assembled pair whose atoms ended up covalently bonded must not be distance-scanned."""
+    import warnings
+    from types import SimpleNamespace
+    from rmlipdata import sample
+    cl = {"symbols": ["C", "O"], "positions": np.array([[0.0, 0.0, 0.0], [1.3, 0.0, 0.0]]),
+          "members": [("EC", [0]), ("CO2", [1])], "composition": "EC1 CO2_1"}
+    monkeypatch.setattr(build, "assemble", lambda *a, **k: cl)
+    cfg = {"charge": {"range": [-2, 2]},
+           "species": {"cations": [], "anions": [], "solvents": ["EC", "CO2"]}}
+    ctx = SimpleNamespace(cfg=cfg, cat=species.catalog(), workdir=tmp_path, rng=np.random.default_rng(0))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert list(sample.pair_scan(ctx, {"n_orient": 1, "scales": [1.0]}, 0)) == []
+    assert any("bonded the members" in str(w.message) for w in caught)
+
+
+def test_pair_scan_cations(tmp_path, monkeypatch):
+    """A2/A3: cation pairs are placed by covalent-radius sum at delta_q 0 and skipped at delta_q +1."""
+    from types import SimpleNamespace
+    from rmlipdata import sample
+    cat = species.catalog()
+    cfg = {"charge": {"range": [-2, 2]},
+           "species": {"cations": ["Li", "Na"], "anions": [], "solvents": []}}
+
+    def boom(*a, **k):
+        raise AssertionError("a cation-only pair must not call assemble/xtb")
+
+    monkeypatch.setattr(build, "assemble", boom)
+    monkeypatch.setattr(sample.xtb, "run_xtb", boom)
+    scfg = {"scales": [0.75, 1.0], "n_orient": 1}
+    ctx = SimpleNamespace(cfg=cfg, cat=cat, workdir=tmp_path, rng=np.random.default_rng(0))
+    recs = list(sample.pair_scan(ctx, scfg, 0))
+    assert len(recs) == 6
+    first = {}
+    for r in recs:
+        p = r["params"]
+        assert p["contact"] == "rcov_sum"
+        first.setdefault(tuple(p["pair"]), p["d_min_A"])
+    assert set(first) == {("Li", "Li"), ("Li", "Na"), ("Na", "Na")}
+    for (a, b), d in first.items():
+        assert np.isclose(d, 0.75 * (sample._cov([a, b], 0) + sample._cov([a, b], 1)), atol=1e-6)
+    ctx = SimpleNamespace(cfg=cfg, cat=cat, workdir=tmp_path, rng=np.random.default_rng(0))
+    assert list(sample.pair_scan(ctx, scfg, 1)) == []
+    assert sample._cluster(SimpleNamespace(cfg=cfg, cat=cat), ("Li", "Na"), 1) == (3, None)
 
 
 def test_xtb_scc_retry(tmp_path, monkeypatch):
@@ -223,3 +310,31 @@ def test_generate_progress(tmp_path, capsys):
     assert " done: " in err
     assert cli.main(["generate", str(path), "--dry"]) == 0
     assert "monomer: " in capsys.readouterr().out
+
+
+def test_pick_balances_templates():
+    """Round-robin over templates in a random template order: with k=1 every template can be picked."""
+    from rmlipdata import sample
+    cand = [("add", i) for i in range(10)] + [("intra_shift", i) for i in range(50)] + [("transfer", 0)]
+    first = {sample._pick(cand, 1, np.random.default_rng(s))[0][0] for s in range(30)}
+    assert first == {"add", "intra_shift", "transfer"}
+    three = sample._pick(cand, 3, np.random.default_rng(0))
+    assert sorted(c[0] for c in three) == ["add", "intra_shift", "transfer"]
+
+
+def test_reaction2_endpoint_check():
+    """reaction2 keeps an endpoint only if it made exactly the template's bond changes."""
+    from rmlipdata import sample
+    sym = ["C", "C", "H", "O"]
+    start = np.array([[0, 0, 0], [3.0, 0, 0], [-1.09, 0, 0], [6.0, 0, 0]], float)
+    b0 = sample._bonds(sym, start)
+    pairs, ranges = [(0, 1)], [(3.0, 1.6)]                      # radical_couple C0-C1 at 1.6 A
+    assert sample._endpoint_check(sym, b0, start, pairs, ranges)[0] == "missed a target distance"
+    coupled = start.copy()
+    coupled[1, 0] = 1.6
+    assert sample._endpoint_check(sym, b0, coupled, pairs, ranges)[0] == ""
+    moved = coupled.copy()
+    moved[3] = [2.9, 0, 0]                                       # O now bonded to C1 too: rearranged
+    assert sample._endpoint_check(sym, b0, moved, pairs, ranges)[0] == "rearranged"
+    assert sample._endpoint_check(sym, sample._bonds(sym, coupled), coupled, pairs, ranges)[0] == \
+        "already in the product state"

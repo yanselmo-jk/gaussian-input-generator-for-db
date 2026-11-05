@@ -44,8 +44,7 @@ def _combos(cfg, cat):
 def _plan(cfg, cat, names):
     combos = _combos(cfg, cat)
     sp = [n for k in ("cations", "anions", "solvents") for n in cfg["species"].get(k, [])]
-    npairs = len([(a, b) for i, a in enumerate(sp) for b in sp[i:]
-                  if not (cat[a].kind == "cation" and cat[b].kind == "cation")])
+    npairs = len(sp) * (len(sp) + 1) // 2  # all pairs, cation pairs included
     plan = {}
     for name in names:
         scfg = cfg["samplers"][name]

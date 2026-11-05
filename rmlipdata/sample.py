@@ -22,6 +22,7 @@ CM_PER_SQRT_EH_BOHR2_AMU = 5140.49
 DONORS = {"O", "N", "F"}
 ELECTROPHILES = {"P", "S", "B"}
 LIMIT = 10 ** 9
+HOP_MAX_DEV_A = 1.0  # hop frames whose cation is farther than this from the intended path point are dropped
 
 
 # ---- distortion helpers (moldistort) --------------------------------------------------------------
@@ -111,6 +112,11 @@ def _formal(ctx, names):
     return sum(ctx.cat[n].charge for n in names)
 
 
+def _cation_only(ctx, names):
+    """True if every member is a cation (a bare Li+/Na+ cluster)."""
+    return all(ctx.cat[n].kind == "cation" for n in names)
+
+
 def _rec(ctx, symbols, positions, charge, sampler, names, job, bs, params):
     return dict(symbols=[str(s) for s in symbols], positions=np.asarray(positions, float), charge=int(charge),
                 sampler=sampler, composition=build.composition(list(names)), job=job, bs=bool(bs),
@@ -133,6 +139,8 @@ def _q_ok(ctx, q):
 
 def _cluster(ctx, combo, delta_q):
     q = _formal(ctx, combo) + int(delta_q)
+    if _cation_only(ctx, combo) and int(delta_q) > 0:
+        return q, None  # no extra oxidation of a bare cation cluster
     key = (tuple(combo), q)
     if not _q_ok(ctx, q):
         return q, None
@@ -171,6 +179,20 @@ def _mols(ctx, combo):
 
 def _cov(symbols, i):
     return float(covalent_radii[atomic_numbers[symbols[i]]])
+
+
+def _bonds(symbols, positions, atoms=None, scale=1.2):
+    """Covalent bonds (i < j) shorter than scale x covalent-radius sum; Li/Na contacts are ionic, so ignored."""
+    pos = np.asarray(positions, float)
+    idx = list(range(len(symbols))) if atoms is None else list(atoms)
+    out = set()
+    for a, i in enumerate(idx):
+        for j in idx[a + 1:]:
+            if symbols[i] in ("Li", "Na") or symbols[j] in ("Li", "Na"):
+                continue
+            if np.linalg.norm(pos[i] - pos[j]) < scale * (_cov(symbols, i) + _cov(symbols, j)):
+                out.add((min(i, j), max(i, j)))
+    return out
 
 
 def _com(pos, idx):
@@ -301,46 +323,68 @@ def pair_scan(ctx, scfg, delta_q):
     """Contact pair assembly, then rigid translation of member B along the COM axis at each scale."""
     names = [n for k in ("cations", "anions", "solvents") for n in ctx.cfg["species"].get(k, [])]
     pairs = [(a, b) for i, a in enumerate(names) for b in names[i:]]
-    pairs = [p for p in pairs if not (ctx.cat[p[0]].kind == "cation" and ctx.cat[p[1]].kind == "cation")]
     max_pairs = int(scfg.get("max_pairs", 10 ** 9))
     if len(pairs) > max_pairs:
         pairs = [pairs[i] for i in ctx.rng.permutation(len(pairs))[:max_pairs]]
     n = 0
     for pair in pairs:
         getattr(ctx, "progress", lambda *a: None)("+".join(pair))
-        for orient in range(int(scfg.get("n_orient", 1))):
+        if _cation_only(ctx, pair) and int(delta_q) > 0:
+            continue  # no extra oxidation of bare cation pairs
+        for orient in range(1 if _cation_only(ctx, pair) else int(scfg.get("n_orient", 1))):  # bare ions: no orientation
             if n >= _limit(scfg):
                 return
             q = _formal(ctx, pair) + int(delta_q)
             if not _q_ok(ctx, q):
                 break
-            cl = build.assemble(list(pair), ctx.cat, ctx.workdir, q, ctx.rng)
-            (_, ia), (_, ib) = cl["members"]
-            pos = cl["positions"]
-            d0 = float(np.linalg.norm(_com(pos, ib) - _com(pos, ia)))
-            if d0 < 1e-6:
-                break
-            u = (_com(pos, ib) - _com(pos, ia)) / d0
-            r = None
-            if _min_between(pos, ia, ib) > 3.0:  # gas-phase xTB opt left a neutral pair apart: bring into contact
-                pos = _shift_to(pos, ia, ib, u, 2.5, d0)
-                r = xtb.run_xtb(cl["symbols"], pos, q, _uhf(cl["symbols"], q), ctx.workdir, mode="opt",
-                                timeout=_timeout(ctx))
-                new = np.asarray(r["positions"], float) if r.get("ok") and "positions" in r else None
-                if new is not None and not (r.get("etemp_K") and _min_between(new, ia, ib) > 3.0):
-                    pos = new  # a smeared opt that pushed the pair apart again keeps the 2.5 A contact
-                else:
-                    r = None
+            extra = {}
+            if _cation_only(ctx, pair):
+                sa = species.geometry(ctx.cat[pair[0]], ctx.workdir)[0]
+                sb = species.geometry(ctx.cat[pair[1]], ctx.workdir)[0]
+                dc = _cov(sa, 0) + _cov(sb, 0)  # cation radii sum is the contact assumption (Li-Li 2.56 A)
+                pos = np.zeros((len(sa) + len(sb), 3))
+                pos[len(sa):, 0] = dc  # B on +x, A at the origin
+                cl = {"symbols": sa + sb, "positions": pos,
+                      "members": [(pair[0], list(range(len(sa)))), (pair[1], list(range(len(sa), len(sa) + len(sb))))]}
+                (_, ia), (_, ib) = cl["members"]
+                d0 = dc
+                u = np.array([1.0, 0.0, 0.0])
+                r = None
+                extra["contact"] = "rcov_sum"
+            else:
+                cl = build.assemble(list(pair), ctx.cat, ctx.workdir, q, ctx.rng)
+                (_, ia), (_, ib) = cl["members"]
+                pos = cl["positions"]
                 d0 = float(np.linalg.norm(_com(pos, ib) - _com(pos, ia)))
+                if d0 < 1e-6:
+                    break
                 u = (_com(pos, ib) - _com(pos, ia)) / d0
+                r = None
+                if _min_between(pos, ia, ib) > 3.0:  # gas-phase xTB opt left a neutral pair apart: bring into contact
+                    pos = _shift_to(pos, ia, ib, u, 2.5, d0)
+                    r = xtb.run_xtb(cl["symbols"], pos, q, _uhf(cl["symbols"], q), ctx.workdir, mode="opt",
+                                    timeout=_timeout(ctx))
+                    new = np.asarray(r["positions"], float) if r.get("ok") and "positions" in r else None
+                    if new is not None and not (r.get("etemp_K") and _min_between(new, ia, ib) > 3.0):
+                        pos = new  # a smeared opt that pushed the pair apart again keeps the 2.5 A contact
+                    else:
+                        r = None
+                    d0 = float(np.linalg.norm(_com(pos, ib) - _com(pos, ia)))
+                    u = (_com(pos, ib) - _com(pos, ia)) / d0
             dc = _min_between(pos, ia, ib)  # contact = shortest inter-member distance
+            if not extra:  # an xtb-relaxed adduct: a rigid distance scan would stretch its new bond
+                sa, sb = set(ia), set(ib)
+                if any((i in sa and j in sb) or (j in sa and i in sb) for i, j in _bonds(cl["symbols"], pos)):
+                    warnings.warn(f"pair_scan {list(pair)} q={q} orient {orient}: xtb opt bonded the members "
+                                  f"(d_min {dc:.2f} A); orientation skipped")
+                    continue
             for s in scfg.get("scales", [1.0]):
                 if n >= _limit(scfg):
                     return
                 moved = _shift_to(pos, ia, ib, u, s * dc, d0)
                 yield _rec(ctx, cl["symbols"], moved, q, "pair_scan", pair, "sp", False,
                            {"pair": list(pair), "orient": orient, "scale": float(s), "contact_A": dc,
-                            "d_min_A": _min_between(moved, ia, ib)} | _etemp(cl, r))
+                            "d_min_A": _min_between(moved, ia, ib)} | extra | _etemp(cl, r))
                 n += 1
 
 
@@ -430,6 +474,16 @@ def bond_scan1(ctx, scfg, delta_q):
                 n += 1
 
 
+def _idpp(images):
+    """IDPP interpolation (ase.mep) of images in place; ASE's NEB default-method notice is not ours to report."""
+    from ase.mep import NEB
+    from ase.mep.neb import idpp_interpolate
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The default method has changed")
+        NEB(images, method="improvedtangent").interpolate()
+        idpp_interpolate(images, traj=None, log=None)
+
+
 def _side(mol, i, j):
     """Local atom indices on j's side of bond i-j; just [j] when the bond is in a ring."""
     side, todo = {j}, [j]
@@ -450,8 +504,6 @@ def bond_scan2(ctx, scfg, delta_q):
     r1 = 1.05 x (sum of covalent radii) + 1.5 A, then optimised by xtb with that distance constrained. The
     n_points images between the cluster and the endpoint get no energy model, as in the OMol25 geodesic /
     Popcornn paths, so they carry no xtb scan artefacts (state switches, rearrangements along the scan)."""
-    from ase.mep import NEB
-    from ase.mep.neb import idpp_interpolate
     bs = bool(scfg.get("bs", False))
     npts = int(scfg.get("n_points", 12))
     max_bonds = int(scfg.get("max_bonds_per_cluster", 10 ** 9))
@@ -463,8 +515,10 @@ def bond_scan2(ctx, scfg, delta_q):
             continue
         symbols, pos = cl["symbols"], np.asarray(cl["positions"], float)
         rcov = np.array([_cov(symbols, k) for k in range(len(symbols))])
+        bonds = _bonds(symbols, pos)
         for i, j, mol, idxs in _bond_candidates(ctx, cl, combo, max_bonds):
             li, lj = idxs.index(i), idxs.index(j)
+            key = (min(i, j), max(i, j))
             side = [idxs[k] for k in _side(mol, li, lj)]
             r0 = float(np.linalg.norm(pos[i] - pos[j]))
             r1 = 1.05 * (rcov[i] + rcov[j]) + 1.5
@@ -474,13 +528,24 @@ def bond_scan2(ctx, scfg, delta_q):
                             constraints=[(i, j, r1)], timeout=_timeout(ctx))
             if not (r.get("ok") and "positions" in r):
                 continue
-            end = np.asarray(r["positions"], float)
+            end, endpoint = np.asarray(r["positions"], float), "xtb"
+            be = _bonds(symbols, end)
+            unexpected = (be - bonds) | (bonds - be - {key})
+            if unexpected:  # the endpoint rearranged beyond breaking i-j
+                if mol.GetBondBetweenAtoms(li, lj).IsInRing():
+                    warnings.warn(f"bond_scan2 {list(combo)} q={q} bond {symbols[i]}{i}-{symbols[j]}{j}: "
+                                  f"xtb endpoint rearranged; skipped")
+                    continue
+                if _bonds(symbols, start) != bonds - {key}:  # moving the fragment hit another atom
+                    warnings.warn(f"bond_scan2 {list(combo)} q={q} bond {symbols[i]}{i}-{symbols[j]}{j}: "
+                                  f"xtb endpoint rearranged and the rigid one makes new bonds; skipped")
+                    continue
+                end, endpoint = start, "rigid"  # keep the unrelaxed displaced geometry as the endpoint
             if build.fragmented(end, [ix for _, ix in cl["members"]]):
                 continue  # endpoint opt pushed whole members apart: not a bond-breaking path
             images = [Atoms(symbols, positions=pos)] + [Atoms(symbols, positions=pos) for _ in range(npts - 2)] \
                 + [Atoms(symbols, positions=end)]
-            NEB(images, method="improvedtangent").interpolate()
-            idpp_interpolate(images, traj=None, log=None)
+            _idpp(images)
             for k, im in enumerate(images[1:], 1):  # image 0 is the cluster itself (cluster opt deck)
                 if n >= _limit(scfg):
                     return
@@ -488,11 +553,15 @@ def bond_scan2(ctx, scfg, delta_q):
                 d = np.linalg.norm(x[:, None] - x[None], axis=2) + np.eye(len(x)) * 1e9
                 if (d < 0.7 * (rcov[:, None] + rcov[None])).any():
                     continue  # interpolation pushed two atoms together
+                if any(np.linalg.norm(x[a] - x[b]) > 1.3 * np.linalg.norm(pos[a] - pos[b])
+                       for a, b in bonds if (a, b) != key):
+                    continue  # interpolation tore another bond
                 yield _rec(ctx, symbols, x, q, "bond_scan2", combo, "sp", bs,
                            {"bond": [i, j], "elements": [symbols[i], symbols[j]], "method": "idpp",
                             "r_A": float(np.linalg.norm(x[i] - x[j])), "index": k,
                             "ring": bool(mol.GetBondBetweenAtoms(li, lj).IsInRing()),
-                            "E_xtb_end_eV": float(r["E_eV"])} | _etemp(cl, r))
+                            "endpoint": endpoint}
+                           | ({"E_xtb_end_eV": float(r["E_eV"])} if endpoint == "xtb" else {}) | _etemp(cl, r))
                 n += 1
 
 
@@ -516,14 +585,39 @@ def _carbonyl_oxygens(mol, c):
 
 
 def _reaction_candidates(ctx, cl, combo):
-    """[(template, atoms, ranges)] over member pairs within 6 A."""
-    infos = []
+    """[(template, pairs, ranges)] over member pairs within 6 A; pairs[k] carries ranges[k] = (start, target)."""
+    infos, cat_infos = [], []
     for (name, idxs), (_, mol) in zip(cl["members"], _mols(ctx, combo)):
-        if ctx.cat[name].kind == "cation":
-            continue
-        infos.append(dict(name=name, idxs=idxs, mol=mol))
+        (cat_infos if ctx.cat[name].kind == "cation" else infos).append(
+            dict(name=name, idxs=idxs, mol=mol))
     pos = cl["positions"]
+    rcov = np.array([_cov(cl["symbols"], k) for k in range(len(cl["symbols"]))])
     cand = []
+    # ring_open_M first (cation-assisted): opening of a ring C-O single bond
+    for ci in cat_infos:
+        for a in infos:
+            if np.linalg.norm(_com(pos, ci["idxs"]) - _com(pos, a["idxs"])) > 6.0:
+                continue
+            rings = []
+            for bd in a["mol"].GetBonds():
+                if not bd.IsInRing():
+                    continue
+                c_atom, o_atom = bd.GetBeginAtom(), bd.GetEndAtom()
+                if o_atom.GetSymbol() == "C":
+                    c_atom, o_atom = o_atom, c_atom
+                if c_atom.GetSymbol() != "C" or o_atom.GetSymbol() != "O":
+                    continue
+                if any(b.GetBondType() == Chem.BondType.DOUBLE for b in o_atom.GetBonds()):
+                    continue
+                rings.append((o_atom.GetIdx(), c_atom.GetIdx()))
+            for o_local, c_local in sorted(rings):
+                c, o = a["idxs"][c_local], a["idxs"][o_local]
+                for m in ci["idxs"]:
+                    cand.append(("ring_open_M", [(c, o), (m, o)],
+                                 [(float(np.linalg.norm(pos[c] - pos[o])),
+                                   1.05 * (rcov[c] + rcov[o]) + 1.5),
+                                  (float(np.linalg.norm(pos[m] - pos[o])),
+                                   build.D_M.get(ci["name"], 2.0))]))
     for ia, a in enumerate(infos):
         donors = [a["idxs"][i] for i in range(a["mol"].GetNumAtoms())
                   if a["mol"].GetAtomWithIdx(i).GetSymbol() in DONORS]
@@ -536,18 +630,18 @@ def _reaction_candidates(ctx, cl, combo):
                 e = b["idxs"][e_local]
                 for nu in donors:
                     d0 = float(np.linalg.norm(pos[nu] - pos[e]))
-                    tgt = 1.05 * (_cov(cl["symbols"], nu) + _cov(cl["symbols"], e))
-                    cand.append(("add", [nu, e], [(d0, tgt)]))
+                    tgt = 1.05 * (rcov[nu] + rcov[e])
+                    cand.append(("add", [(nu, e)], [(d0, tgt)]))
                     carbonyl_o = _carbonyl_oxygens(b["mol"], e_local)
                     for x in b["mol"].GetAtomWithIdx(e_local).GetNeighbors():
                         if x.GetSymbol() not in ("O", "F") or x.GetIdx() in carbonyl_o:
                             continue
                         l = b["idxs"][x.GetIdx()]
                         r0 = float(np.linalg.norm(pos[e] - pos[l]))
-                        tgt2 = 1.05 * (_cov(cl["symbols"], e) + _cov(cl["symbols"], l)) + 1.5
-                        cand.append(("substitute", [nu, e, l], [(d0, tgt), (r0, tgt2)]))
+                        tgt2 = 1.05 * (rcov[e] + rcov[l]) + 1.5
+                        cand.append(("substitute", [(nu, e), (e, l)], [(d0, tgt), (r0, tgt2)]))
     # transfer: X (F/H) bonded to Y in a non-cation member A -> cation, or an electrophile of another member
-    cations = [k for (name, idxs) in cl["members"] if ctx.cat[name].kind == "cation" for k in idxs]
+    cations = [k for ci in cat_infos for k in ci["idxs"]]
     for a in infos:
         for x_local in range(a["mol"].GetNumAtoms()):
             if a["mol"].GetAtomWithIdx(x_local).GetSymbol() not in ("F", "H"):
@@ -555,22 +649,91 @@ def _reaction_candidates(ctx, cl, combo):
             for y_atom in a["mol"].GetAtomWithIdx(x_local).GetNeighbors():
                 x, y = a["idxs"][x_local], a["idxs"][y_atom.GetIdx()]
                 rxy = float(np.linalg.norm(pos[y] - pos[x]))
-                tgt = 1.05 * (_cov(cl["symbols"], y) + _cov(cl["symbols"], x)) + 1.2
+                tgt = 1.05 * (rcov[y] + rcov[x]) + 1.2
                 for z in cations:
                     if np.linalg.norm(_com(pos, a["idxs"]) - pos[z]) > 6.0:
                         continue
                     dz = float(np.linalg.norm(pos[z] - pos[x]))
-                    ztgt = 0.9 * (_cov(cl["symbols"], z) + _cov(cl["symbols"], x))
-                    cand.append(("transfer", [y, x, z], [(rxy, tgt), (dz, ztgt)]))
+                    ztgt = 0.9 * (rcov[z] + rcov[x])
+                    cand.append(("transfer", [(y, x), (z, x)], [(rxy, tgt), (dz, ztgt)]))
                 for b in infos:
                     if b is a or np.linalg.norm(_com(pos, a["idxs"]) - _com(pos, b["idxs"])) > 6.0:
                         continue
                     for e_local in _electrophiles(b["mol"]):
                         z = b["idxs"][e_local]
                         dz = float(np.linalg.norm(pos[z] - pos[x]))
-                        ztgt = 1.0 * (_cov(cl["symbols"], z) + _cov(cl["symbols"], x))
-                        cand.append(("transfer", [y, x, z], [(rxy, tgt), (dz, ztgt)]))
+                        ztgt = 1.0 * (rcov[z] + rcov[x])
+                        cand.append(("transfer", [(y, x), (z, x)], [(rxy, tgt), (dz, ztgt)]))
+    # radical_couple: two radical centres of different members
+    for ai, a in enumerate(infos):
+        ra = [a["idxs"][i] for i in _radical_atoms(a["mol"])]
+        if not ra:
+            continue
+        for b in infos[ai + 1:]:
+            if np.linalg.norm(_com(pos, a["idxs"]) - _com(pos, b["idxs"])) > 6.0:
+                continue
+            for i in ra:
+                for j in [b["idxs"][k] for k in _radical_atoms(b["mol"])]:
+                    d0 = float(np.linalg.norm(pos[i] - pos[j]))
+                    cand.append(("radical_couple", [(i, j)], [(d0, 1.05 * (rcov[i] + rcov[j]))]))
+    # h_abstract: a radical centre of A takes an H bonded to Y of a different member B
+    for a in infos:
+        ra = [a["idxs"][i] for i in _radical_atoms(a["mol"])]
+        if not ra:
+            continue
+        for b in infos:
+            if b is a or np.linalg.norm(_com(pos, a["idxs"]) - _com(pos, b["idxs"])) > 6.0:
+                continue
+            for h_local in range(b["mol"].GetNumAtoms()):
+                if b["mol"].GetAtomWithIdx(h_local).GetSymbol() != "H":
+                    continue
+                h = b["idxs"][h_local]
+                for y_atom in b["mol"].GetAtomWithIdx(h_local).GetNeighbors():
+                    y = b["idxs"][y_atom.GetIdx()]
+                    r0 = float(np.linalg.norm(pos[y] - pos[h]))
+                    tgt0 = 1.05 * (rcov[y] + rcov[h]) + 1.2
+                    for r in ra:
+                        d0 = float(np.linalg.norm(pos[r] - pos[h]))
+                        cand.append(("h_abstract", [(y, h), (r, h)],
+                                     [(r0, tgt0), (d0, 1.05 * (rcov[r] + rcov[h]))]))
+    # intra_shift: H/F of one member moves to an atom 2-3 bonds away in the same member
+    for a in infos:
+        dm = Chem.GetDistanceMatrix(a["mol"])
+        for x_local in range(a["mol"].GetNumAtoms()):
+            xa = a["mol"].GetAtomWithIdx(x_local)
+            if xa.GetSymbol() not in ("H", "F"):
+                continue
+            for y_atom in xa.GetNeighbors():
+                y_local = y_atom.GetIdx()
+                x, y = a["idxs"][x_local], a["idxs"][y_local]
+                rxy = float(np.linalg.norm(pos[y] - pos[x]))
+                tgt0 = 1.05 * (rcov[y] + rcov[x]) + 1.2
+                for z_local in range(a["mol"].GetNumAtoms()):
+                    if z_local == y_local or a["mol"].GetAtomWithIdx(z_local).GetSymbol() == "H":
+                        continue
+                    if int(dm[x_local, z_local]) not in (2, 3):
+                        continue
+                    z = a["idxs"][z_local]
+                    dz = float(np.linalg.norm(pos[z] - pos[x]))
+                    cand.append(("intra_shift", [(y, x), (z, x)],
+                                 [(rxy, tgt0), (dz, 1.05 * (rcov[z] + rcov[x]))]))
     return cand
+
+
+def _pick(cand, k, rng):
+    """At most k candidates, taken round-robin over templates (each template shuffled), so a template with many
+    candidates (intra_shift: every H to every atom 2-3 bonds away) does not crowd out the others."""
+    groups = {}
+    for c in cand:
+        groups.setdefault(c[0], []).append(c)
+    groups = [[g[i] for i in rng.permutation(len(g))] for _, g in sorted(groups.items())]
+    groups = [groups[i] for i in rng.permutation(len(groups))]  # no template always first
+    out = []
+    while len(out) < k and any(groups):
+        for g in groups:
+            if g and len(out) < k:
+                out.append(g.pop(0))
+    return out
 
 
 def reaction(ctx, scfg, delta_q):
@@ -587,15 +750,12 @@ def reaction(ctx, scfg, delta_q):
         if cl is None:
             continue
         cand = [c for c in _reaction_candidates(ctx, cl, combo) if c[0] in templates]
-        if len(cand) > max_per:
-            cand = [cand[i] for i in ctx.rng.permutation(len(cand))[:max_per]]
-        for template, atoms, ranges in cand:
+        cand = _pick(cand, max_per, ctx.rng)
+        for template, pairs, ranges in cand:
             if n >= _limit(scfg):
                 return
-            if template == "transfer":
-                cons = [(atoms[0], atoms[1], ranges[0][0]), (atoms[2], atoms[1], ranges[1][0])]
-            else:
-                cons = [(atoms[k], atoms[k + 1], ranges[k][0]) for k in range(len(ranges))]
+            atoms = list(dict.fromkeys(i for p in pairs for i in p))
+            cons = [(a, b, r0) for (a, b), (r0, _) in zip(pairs, ranges)]
             r = xtb.run_xtb(cl["symbols"], cl["positions"], q, _uhf(cl["symbols"], q), ctx.workdir, mode="sp",
                             constraints=cons, scan=dict(n=npts, ranges=ranges), timeout=_timeout(ctx))
             if not r.get("ok"):
@@ -609,9 +769,103 @@ def reaction(ctx, scfg, delta_q):
                 if n >= _limit(scfg):
                     return
                 yield _rec(ctx, cl["symbols"], r["frames"][k], q, "reaction", combo, "sp", bs,
-                           {"template": template, "atoms": list(atoms), "ranges": [list(x) for x in ranges],
+                           {"template": template, "atoms": atoms, "pairs": [list(x) for x in pairs],
+                            "ranges": [list(x) for x in ranges],
                             "index": int(k), "peak_index": int(p), "is_peak": bool(k == p),
                             "E_xtb_eV": float(E[k])} | _etemp(cl, r))
+                n += 1
+
+
+def _radical_atoms(mol):
+    """Local atom indices with unpaired electrons (catalog radicals: EC_ro, MeOCO2, CH3, CH3O)."""
+    return [a.GetIdx() for a in mol.GetAtoms() if a.GetNumRadicalElectrons() > 0]
+
+
+def _endpoint_check(symbols, b0, end, pairs, ranges, tol=0.3):
+    """('', formed, broken) if the endpoint made exactly the template's bond changes, else (reason, ...).
+    A pair whose target is below 1.3 x r_cov sum (no Li/Na) must form, one stretched by >= 1.2 A must break, every
+    constrained distance (ionic M-X ones included) must be within tol A of its target, and the cluster must not
+    already be in the product state."""
+    rc = [_cov(symbols, k) for k in range(len(symbols))]
+    formed, broken = set(), set()
+    for (a, b), (_, t) in zip(pairs, ranges):
+        pair = (min(a, b), max(a, b))
+        if t < 1.3 * (rc[a] + rc[b]) and not {"Li", "Na"} & {symbols[a], symbols[b]}:
+            formed.add(pair)
+        if t >= 1.05 * (rc[a] + rc[b]) + 1.2:
+            broken.add(pair)
+    b1 = _bonds(symbols, end)
+    if formed & b0 or not broken <= b0:
+        return "already in the product state", formed, broken
+    if any(abs(float(np.linalg.norm(end[a] - end[b])) - t) > tol for (a, b), (_, t) in zip(pairs, ranges)):
+        return "missed a target distance", formed, broken
+    if not formed <= b1 or broken & b1:
+        return "did not make the template bonds", formed, broken
+    if (b0 ^ b1) - formed - broken:
+        return "rearranged", formed, broken
+    return "", formed, broken
+
+
+def reaction2(ctx, scfg, delta_q):
+    """Pseudo-TS reaction paths between the cluster and an xTB-optimised product endpoint (IDPP interpolation)."""
+    bs = bool(scfg.get("bs", False))
+    templates = set(scfg.get("templates", []))
+    npts = int(scfg.get("n_points", 14))
+    max_per = int(scfg.get("max_per_cluster", 10 ** 9))
+    free_opt = bool(scfg.get("free_opt", True))
+    n = 0
+    for combo in _combos(ctx):
+        getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))
+        q, cl = _cluster(ctx, combo, delta_q)
+        if cl is None:
+            continue
+        symbols, pos = cl["symbols"], np.asarray(cl["positions"], float)
+        rcov = np.array([_cov(symbols, k) for k in range(len(symbols))])
+        members = [ix for _, ix in cl["members"]]
+        b0 = _bonds(symbols, pos)
+        cand = [c for c in _reaction_candidates(ctx, cl, combo) if c[0] in templates]
+        cand = _pick(cand, max_per, ctx.rng)
+        for template, pairs, ranges in cand:
+            if n >= _limit(scfg):
+                return
+            atoms = list(dict.fromkeys(i for p in pairs for i in p))
+            cons = [(a, b, t) for (a, b), (_, t) in zip(pairs, ranges)]
+            r = xtb.run_xtb(symbols, pos, q, _uhf(symbols, q), ctx.workdir, mode="opt",
+                            constraints=cons, timeout=_timeout(ctx))
+            if not (r.get("ok") and "positions" in r):
+                continue
+            end = np.asarray(r["positions"], float)
+            if build.fragmented(end, members):
+                continue
+            why, formed, broken = _endpoint_check(symbols, b0, end, pairs, ranges)
+            if why:
+                warnings.warn(f"reaction2 {template} {list(combo)} q={q}: endpoint {why}; skipped")
+                continue
+            b1 = _bonds(symbols, end)
+            endpoint = "constrained"
+            if free_opt:
+                rf = xtb.run_xtb(symbols, end, q, _uhf(symbols, q), ctx.workdir, mode="opt",
+                                 timeout=_timeout(ctx))
+                e2 = np.asarray(rf.get("positions"), float) if rf.get("ok") and "positions" in rf else None
+                if e2 is not None and not build.fragmented(e2, members) and _bonds(symbols, e2) == b1:
+                    end, endpoint, r = e2, "free", rf
+            images = [Atoms(symbols, positions=pos)] + [Atoms(symbols, positions=pos) for _ in range(npts - 2)] \
+                + [Atoms(symbols, positions=end)]
+            _idpp(images)
+            for k, im in enumerate(images[1:], 1):  # image 0 is the cluster itself (cluster opt deck)
+                if n >= _limit(scfg):
+                    return
+                x = im.get_positions()
+                d = np.linalg.norm(x[:, None] - x[None], axis=2) + np.eye(len(x)) * 1e9
+                if (d < 0.7 * (rcov[:, None] + rcov[None])).any():
+                    continue  # interpolation pushed two atoms together
+                if any(np.linalg.norm(x[i] - x[j]) > 1.3 * np.linalg.norm(pos[i] - pos[j])
+                       for i, j in b0 - broken):
+                    continue  # a surviving bond stretched far beyond its cluster length
+                yield _rec(ctx, symbols, x, q, "reaction2", combo, "sp", bs,
+                           {"template": template, "atoms": atoms, "pairs": [list(p) for p in pairs],
+                            "index": k, "endpoint": endpoint, "E_xtb_end_eV": float(r["E_eV"])}
+                           | _etemp(cl, r))
                 n += 1
 
 
@@ -656,6 +910,19 @@ def hop(ctx, scfg, delta_q):
                 p1 = pos[m].copy()
                 rest = [i for i in range(len(symbols)) if i != m]
                 rcov = np.array([_cov(symbols, i) for i in range(len(symbols))])
+                r3, best = None, -1.0  # third reference atom: pins the cation to the d1-d2 axis
+                for k, s in enumerate(symbols):
+                    if s == "H" or s in ("Li", "Na") or k in (d1, int(d2)):
+                        continue
+                    if np.linalg.norm(pos[k] - 0.5 * (p1 + p2)) > 6.0:
+                        continue
+                    v = pos[k] - pos[d1]
+                    ab = pos[int(d2)] - pos[d1]
+                    perp = np.linalg.norm(v - (v @ ab) / (ab @ ab) * ab)
+                    if perp > best:  # ties: lowest index wins
+                        r3, best = k, perp
+                if best < 0.5:
+                    r3 = None  # (nearly) on the d1-d2 axis: it would not pin the cation
                 cur = pos.copy()
                 for t in np.linspace(0.0, 1.0, npts):
                     if n >= _limit(scfg):
@@ -665,6 +932,10 @@ def hop(ctx, scfg, delta_q):
                     cur[m] = pt
                     cons = [(m, d1, float(np.linalg.norm(pt - pos[d1]))), (m, int(d2), float(np.linalg.norm(pt - pos[d2]))),
                             (d1, int(d2), float(np.linalg.norm(pos[d1] - pos[d2])))]
+                    if r3 is not None:
+                        cons += [(m, r3, float(np.linalg.norm(pt - pos[r3]))),
+                                 (d1, r3, float(np.linalg.norm(pos[d1] - pos[r3]))),
+                                 (int(d2), r3, float(np.linalg.norm(pos[int(d2)] - pos[r3])))]
                     if any(r0 < 0.75 * (rcov[m] + rcov[d]) for _, d, r0 in cons[:2]):
                         continue  # path runs through a donor; the guard below would drop this frame anyway
                     r = xtb.run_xtb(symbols, cur, q, _uhf(symbols, q), ctx.workdir, mode="opt",
@@ -672,13 +943,17 @@ def hop(ctx, scfg, delta_q):
                     if not (r.get("ok") and "positions" in r):
                         continue
                     cur = np.asarray(r["positions"], float)
+                    dev = float(np.linalg.norm(_kabsch(cur, pos, rest)[m] - pt))
+                    if dev > HOP_MAX_DEV_A:
+                        continue  # e.g. mirror image across the reference plane: not on the intended path
                     dm = np.linalg.norm(cur[rest] - cur[m], axis=1)
                     if (dm < 0.75 * (rcov[m] + rcov[rest])).any():
                         continue  # cation runs into an atom: no useful PES point
                     yield _rec(ctx, symbols, cur, q, "hop", combo, "sp", False,
                                {"cation": cation, "cation_index": int(m), "from_donor": d1, "to_donor": int(d2), "t": float(t),
                                 "d_from_A": float(np.linalg.norm(cur[m] - cur[d1])),
-                                "d_to_A": float(np.linalg.norm(cur[m] - cur[d2]))} | _etemp(cl, r))
+                                "d_to_A": float(np.linalg.norm(cur[m] - cur[d2])),
+                                "path_dev_A": dev, "ref3": r3} | _etemp(cl, r))
                     n += 1
 
 
@@ -711,4 +986,4 @@ def nanoreactor(ctx, scfg, delta_q):
 
 
 SAMPLERS = {"monomer": monomer, "pair_scan": pair_scan, "cluster": cluster, "bond_scan1": bond_scan1, "bond_scan2": bond_scan2,
-            "reaction": reaction, "hop": hop, "nanoreactor": nanoreactor}
+            "reaction": reaction, "reaction2": reaction2, "hop": hop, "nanoreactor": nanoreactor}

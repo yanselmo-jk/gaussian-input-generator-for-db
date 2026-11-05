@@ -12,6 +12,7 @@ samplers:
   cluster: {on: true, n_distort: 5, rattle_A: 0.05}
   bond_scan1: {on: true, n_points: 12, max_bonds_per_cluster: 6, bs: true}
   bond_scan2: {on: true, n_points: 12, max_bonds_per_cluster: 6, bs: true}
-  reaction: {on: true, templates: [add, substitute, transfer], n_points: 14, k_peak: 2, max_per_cluster: 6, bs: true}
+  reaction: {on: true, templates: [add, substitute, transfer, radical_couple, h_abstract, intra_shift, ring_open_M], n_points: 14, k_peak: 2, max_per_cluster: 6, bs: true}
+  reaction2: {on: true, templates: [add, substitute, transfer, radical_couple, h_abstract, intra_shift, ring_open_M], n_points: 12, max_per_cluster: 6, bs: true, free_opt: true}
   hop: {on: true, n_points: 10, max_per_cluster: 3}
   nanoreactor: {on: false, T_K: 1500, ncyc: 2, every_n_frames: 50}

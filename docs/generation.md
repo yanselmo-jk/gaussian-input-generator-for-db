@@ -50,11 +50,12 @@ xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, c
 | sampler | 만드는 구조 | 주요 설정 | job |
 |---|---|---|---|
 | `monomer` | 분자/음이온 최적화 구조, normal-mode 변형, torsion/angle 변형, 단원자 양이온 | `n_normal_mode`, `n_distort`, `T_K` | opt / sp |
-| `pair_scan` | 두 성분의 거리를 바꾼 binding curve | `max_pairs`, `n_orient`, `scales` | sp |
+| `pair_scan` | 두 성분의 거리를 바꾼 binding curve. 양이온 쌍(Li–Li, Li–Na, Na–Na) 포함 | `max_pairs`, `n_orient`, `scales` | sp |
 | `cluster` | M+(solvent)n(anion)m 최적화 구조와 흔든 구조 | `n_distort`, `rattle_A` (기본 0.05 Å, xTB 기준 원자당 약 0.1 eV) | opt / sp |
 | `bond_scan1` | bond 하나를 끊어질 때까지 늘이며 xTB로 relax한 scan | `n_points`, `max_bonds_per_cluster`, `bs` | sp |
 | `bond_scan2` | 같은 bond를 IDPP interpolation으로 늘인 경로. 끝점만 xTB 최적화 | `n_points`, `max_bonds_per_cluster`, `bs` | sp |
-| `reaction` | 첨가 / 치환 / F·H 이동 경로의 pseudo-TS | `templates`, `n_points`, `k_peak`, `max_per_cluster`, `bs` | sp |
+| `reaction` | 첨가 / 치환 / F·H 이동 / radical 결합 / H 빼앗기 / 분자 내 H·F 이동 / 양이온 보조 고리 열림의 pseudo-TS (xTB relaxed scan) | `templates`, `n_points`, `k_peak`, `max_per_cluster`, `bs` | sp |
+| `reaction2` | reaction과 같은 template. xTB로 최적화한 생성물 끝점까지 IDPP interpolation | `templates`, `n_points`, `max_per_cluster`, `bs`, `free_opt` | sp |
 | `hop` | Li+/Na+가 donor 원자 사이를 옮겨 가는 경로 | `n_points`, `max_per_cluster` | sp |
 | `nanoreactor` | 고온 xTB MD snapshot (기본 off) | `T_K`, `ncyc`, `every_n_frames` | sp |
 
@@ -63,7 +64,7 @@ xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, c
 xTB 구조 하나는 charge와 spin 조합 수만큼 deck(Gaussian 입력 파일)으로 늘어남.
 - **charge**: `charge.delta_q` 값마다 "형식 전하 + Δq"로 하나씩 만듦. 결과가 `charge.range` 밖이면 xTB 계산 전에 건너뜀.
 - **multiplicity**: 최저 multiplicity에 `charge.mult_offsets`를 더한 값들을 씀. 기본은 최저값과 최저값+2임. 전자 수 + 1보다 큰 multiplicity는 뺌.
-- **BS singlet**: `bs: true`인 sampler(`bond_scan1`, `bond_scan2`, `reaction`)에서 전자 수가 짝수인 구조의 singlet은 R 대신 U + `guess=mix`(BS singlet)로만 만듦. 같은 구조에 singlet label이 하나만 생기게 하기 위함임. OMol25도 bond가 끊어질 수 있는 singlet을 UKS와 대칭을 깬 초기 guess로 계산함. bond가 끊어지지 않은 구조에서는 UKS 해가 R 해로 돌아옴.
+- **BS singlet**: `bs: true`인 sampler(`bond_scan1`, `bond_scan2`, `reaction`, `reaction2`)에서 전자 수가 짝수인 구조의 singlet은 R 대신 U + `guess=mix`(BS singlet)로만 만듦. 같은 구조에 singlet label이 하나만 생기게 하기 위함임. OMol25도 bond가 끊어질 수 있는 singlet을 UKS와 대칭을 깬 초기 guess로 계산함. bond가 끊어지지 않은 구조에서는 UKS 해가 R 해로 돌아옴.
 - **상한**: `max_structures`는 charge와 spin으로 늘리기 전의 구조 수에 대한 상한임.
 
 | sampler | opt deck | sp deck | BS singlet |
@@ -72,8 +73,9 @@ xTB 구조 하나는 charge와 spin 조합 수만큼 deck(Gaussian 입력 파일
 | `pair_scan` | 없음 | 쌍 × 방향(`n_orient`) × 거리(`scales`)마다 1개 | 없음 |
 | `cluster` | 조합마다 조립 후 xTB로 최적화한 cluster 1개 | 흔든 구조 `n_distort`개 | 없음 |
 | `bond_scan1` | 없음 | bond마다 scan frame 최대 `n_points`개. energy가 급변하거나 cluster가 분리된 frame부터 뒤는 버림 | `bs: true`면 singlet을 BS로만 |
-| `bond_scan2` | 없음 | bond마다 최대 `n_points` − 1개. 첫 image는 cluster와 같아서 빼고, 원자가 겹친 image도 버림 | `bs: true`면 singlet을 BS로만 |
+| `bond_scan2` | 없음 | bond마다 최대 `n_points` − 1개. 첫 image는 cluster와 같아서 빼고, 원자가 겹치거나 다른 bond가 1.3배 넘게 늘어난 image도 버림 | `bs: true`면 singlet을 BS로만 |
 | `reaction` | 없음 | 경로마다 시작 frame, 끝 frame, 최고점 ±`k_peak` frame | `bs: true`면 singlet을 BS로만 |
+| `reaction2` | 없음 | 경로마다 최대 `n_points` − 1개. 첫 image는 빼고, 원자가 겹치거나 절단 대상이 아닌 bond가 1.3배 넘게 늘어난 image는 버림 | `bs: true`면 singlet을 BS로만 |
 | `hop` | 없음 | 경로마다 최대 `n_points`개. 양이온이 다른 원자와 겹치는 점은 버림 | 없음 |
 | `nanoreactor` | 없음 | MD trajectory에서 `every_n_frames`마다 snapshot 1개 | 없음 |
 
@@ -90,6 +92,9 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
   - 두 성분을 접촉 상태로 놓고 xTB로 최적화함. 이때의 최단 원자 간 거리를 접촉 거리라고 함.
   - 접촉하지 않은 중성 쌍(최단 거리 > 3 Å)은 먼저 2.5 Å까지 붙인 뒤 xTB로 최적화함.
   - 두 번째 성분을 질량중심 축을 따라 옮겨, 최단 원자 간 거리가 `scales` × 접촉 거리가 되게 함.
+  - 최적화 후 두 성분 사이에 공유결합(거리 < 1.2 × 공유결합 반지름 합, Li/Na 쌍 제외)이 생긴 방향은 scan하지 않고 경고를 남김. 결합한 adduct를 통째로 옮기면 새 bond 길이에 scale이 곱해지기 때문임 (예: EC + CO₂ q=−1에서 접촉 1.31 Å, scale 0.75면 0.98 Å).
+  - 양이온 쌍은 xTB 없이 공유결합 반지름 합(가정, Li–Li 2.56 Å)을 접촉 거리로 쓰고 방향은 1개만 만듦. params `contact: rcov_sum`.
+  - 양이온만으로 된 계(양이온 쌍, 양이온만 있는 cluster)는 Δq > 0(추가 산화)을 만들지 않음.
 - **cluster 조립**
   - 양이온이 있으면 각 성분의 donor 원자(O, N, F)가 양이온을 향하도록 배치함.
     - 배위 방향은 사면체 방향 중에서 고름.
@@ -112,18 +117,38 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
   - 끝점: bond의 j쪽 조각(고리 bond면 j 원자 하나)을 bond 방향으로 옮겨 i–j 거리를 r1 = 1.05 × (공유결합 반지름 합) + 1.5 Å로 만든 뒤, 그 거리를 고정하고 xTB로 최적화함.
   - cluster와 끝점 사이를 IDPP interpolation(`ase.mep`)으로 `n_points`개 image로 이음. 중간 image는 energy model 없이 기하로만 정해지므로 xTB scan의 jump나 재배열이 없음. OMol25의 geodesic / Popcornn 경로와 같은 방식임.
   - 첫 image(cluster 자체)는 cluster opt deck과 같아서 쓰지 않음. 두 원자가 0.7 × (공유결합 반지름 합)보다 가까운 image는 버림. 끝점 최적화에서 성분이 4 Å 넘게 떨어지면 그 bond를 건너뜀.
-  - params: `method: idpp`, `r_A`, `index`, `ring`, `E_xtb_end_eV`.
+  - 끝점에서 대상 bond 외의 bond가 바뀌면(재배열) 고리가 아닌 bond는 최적화 전 구조(조각만 옮긴 구조)를 끝점으로 씀(`endpoint: rigid`). 그 구조에서도 새 bond가 생기면 건너뜀. 고리 bond는 건너뜀. c4 test config에서 xTB 끝점 16개 중 8개가 H 빼앗기, F 추가 이탈 같은 실제 반응을 일으킴 (2026-11-05, 우리 계산).
+  - 다른 bond가 원래 길이의 1.3배를 넘는 image도 버림.
+  - params: `method: idpp`, `r_A`, `index`, `ring`, `endpoint`, `E_xtb_end_eV`(xTB 끝점일 때만).
 - **reaction (pseudo-TS)**
   - template:
     - `add`: 친핵 원자(O/N/F) → 친전자 원자(carbonyl C, P, S, B)
     - `substitute`: add와 동시에 이탈기(O/F)를 끊음
     - `transfer`: F/H가 양이온이나 다른 분자의 친전자 원자로 이동
+    - `radical_couple`: 서로 다른 성분의 radical 원자끼리 결합
+    - `h_abstract`: radical 원자가 다른 성분의 H를 빼앗음
+    - `intra_shift`: 한 분자 안에서 H/F가 2–3 bond 떨어진 원자로 이동
+    - `ring_open_M`: 양이온이 고리 O(이중결합 없는 O)에 다가가며 고리 C–O가 끊어짐
+  - radical 원자는 SMILES의 radical 표시로 찾음 (현재 EC_ro, MeOCO2, CH3, CH3O).
+  - 후보는 template별로 섞고 template 순서도 무작위로 정한 뒤 돌아가며 `max_per_cluster`개를 고름. `intra_shift` 후보가 다른 template보다 훨씬 많아 다른 template이 뽑히지 않던 문제 때문임.
   - concerted xTB scan의 최고점 ±`k_peak`개 frame에 첫 frame과 마지막 frame을 더해 씀.
   - 엄밀한 TS가 아님. 반응 PES를 sampling하기 위한 구조임.
+- **reaction2**
+  - 후보와 선택 규칙은 reaction과 같음.
+  - 끝점: 모든 constraint 거리를 목표값으로 고정하고 xTB로 최적화함. 다음 중 하나면 경고와 함께 건너뜀.
+    - 출발 cluster가 이미 생성물 상태임.
+    - constraint 거리가 목표에서 0.3 Å 넘게 벗어남.
+    - 만들어야 할 bond가 생기지 않았거나 끊어야 할 bond가 남음.
+    - 그 밖의 bond가 바뀜(재배열).
+  - `free_opt: true`면 제약 없이 한 번 더 최적화하고, bond 구성이 같으면 그 구조를 끝점으로 씀(`endpoint: free`). 아니면 `constrained`.
+  - cluster와 끝점 사이를 IDPP로 `n_points`개 image로 잇고, energy 없이 기하로 만든 경로라 peak를 고르지 않고 모든 image를 씀.
+  - params: `template`, `atoms`, `pairs`, `index`, `endpoint`, `E_xtb_end_eV`.
 - **hop**
   - 양이온 위치를 출발점에서 도착 donor 원자 앞까지 선형으로 옮김.
   - 도착 donor는 출발 donor와 다른 원자만 고름 (양이온이 가장 가까운 donor에서 2.6 Å보다 멀면 그 donor가 후보 범위에 들어오기 때문).
   - 각 점에서 양이온–출발 donor, 양이온–도착 donor, 두 donor 사이 거리를 constraint로 묶고 나머지를 xTB로 최적화함. xtb `$fix`는 이 cluster들에서 원자를 정확히 고정하지 못함 (고정한 원자가 최대 2 Å 움직임).
+  - 기준 원자 r3(경로 중점 6 Å 이내 heavy atom 중 donor 축에서 가장 먼 원자, 축에서 0.5 Å 이상)와 양이온·두 donor 사이 거리도 고정함 (총 6개). 3개만 쓰면 양이온이 donor 축을 중심으로 돌 수 있었음: c4 config에서 경로 이탈 최대 2.94 → 0.52 Å (2026-11-05, 우리 계산).
+  - 양이온이 의도한 점에서 1.0 Å 넘게 벗어난 frame(예: 기준 평면에 대한 거울상)은 버림. params `path_dev_A`, `ref3`.
   - 양이온이 어떤 원자에 공유결합 반지름 합의 0.75배보다 가까워진 frame은 버림.
   - 양이온–donor constraint 거리 자체가 공유결합 반지름 합의 0.75배보다 짧은 점은 xTB를 돌리지 않고 건너뜀.
 
