@@ -2,6 +2,7 @@
 import argparse
 import csv
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -202,6 +203,9 @@ def generate(cfg, only=None, dry=False):
                 if low_sid is None or mult == low:
                     low_sid = sid
                 if registry.gjf_path(con, sid):
+                    if parent is None:  # same deck reached as a vertical one first: the stage record wins
+                        con.execute("UPDATE structures SET parent_id=NULL, params=? WHERE id=? AND parent_id IS NOT NULL",
+                                    (json.dumps(params or {}), sid))
                     continue  # deck already written by an earlier run
                 path = out / "gjf" / rec["job"] / name / f"{sid}.gjf"
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -227,7 +231,7 @@ def generate(cfg, only=None, dry=False):
             return n
         symbols = rec["symbols"]
         formal = q0 - int(dq)
-        if q0 - 1 >= qlo and abs(q0 - 1 - formal) <= 1 and any(s in ("Li", "Na") for s in symbols):
+        if q0 - 1 >= max(qlo, -1) and abs(q0 - 1 - formal) <= 1 and any(s in ("Li", "Na") for s in symbols):
             n += emit(q0 - 1, dict(rec["params"], vertical_dq=-1), base)[0]
         if q0 + 1 <= qhi and abs(q0 + 1 - formal) <= 1 and any(s not in ("Li", "Na") for s in symbols):
             n += emit(q0 + 1, dict(rec["params"], vertical_dq=1), base)[0]

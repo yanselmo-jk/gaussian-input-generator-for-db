@@ -314,7 +314,8 @@ def monomer(ctx, scfg, delta_q):
             symbols, positions, mol = species.geometry(sp, ctx.workdir, charge=q)
             if q != sp.charge:
                 s0, p0, _ = species.geometry(sp, ctx.workdir)
-                if len(_components(symbols, positions)) != len(_components(s0, p0)):
+                comps = _components(symbols, positions)  # Li/Na are single-atom groups
+                if len(comps) != len(_components(s0, p0)) or build.fragmented(positions, comps):
                     warnings.warn(f"monomer {name} q={q}: xtb opt dissociated the molecule; skipped")
                     continue
             yield _rec(ctx, symbols, positions, q, "monomer", [name], "opt", False, {"kind": "opt", "index": 0})
@@ -322,7 +323,9 @@ def monomer(ctx, scfg, delta_q):
             if n >= _limit(scfg):
                 return
 
-            rng = np.random.default_rng(int(ctx.cfg.get("seed", 0)) + zlib.crc32(f"monomer{name}{q}".encode()))
+            seed = int(ctx.cfg.get("seed", 0))
+            rng = np.random.default_rng(seed + zlib.crc32(f"monomer{name}{q}".encode()))
+            rng_d = np.random.default_rng(seed + zlib.crc32(f"monomer_distort{name}{q}".encode()))  # a failed hess must not shift these
             r = xtb.run_xtb(symbols, positions, q, _uhf(symbols, q), ctx.workdir, mode="hess",
                             timeout=_timeout(ctx))
             for k in range(int(scfg.get("n_normal_mode", 0))):
@@ -336,7 +339,7 @@ def monomer(ctx, scfg, delta_q):
                            {"kind": "normal_mode", "T_K": float(scfg.get("T_K", 500)), "index": k} | _etemp(r))
                 n += 1
 
-            frames = sample(_with_positions(mol, positions), int(scfg.get("n_distort", 0)), rng=rng)
+            frames = sample(_with_positions(mol, positions), int(scfg.get("n_distort", 0)), rng=rng_d)
             for k, pos in enumerate(frames[1:int(scfg.get("n_distort", 0)) + 1]):
                 if n >= _limit(scfg):
                     return

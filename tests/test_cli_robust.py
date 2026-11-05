@@ -132,3 +132,19 @@ def test_gjf_info_without_route_line(tmp_path):
     p.write_text("%nprocshared=1\n%mem=1GB\n\ntitle\n\n0 1\nH 0.0 0.0 0.0\n\n\n")
     with pytest.raises(ValueError, match="no route line"):
         cli._gjf_info(p)
+
+
+def test_vertical_reduction_stops_at_minus_one(tmp_path, monkeypatch):
+    """A Li-containing record already at q=-1 gets no vertical q=-2 deck (unbound gas-phase dianion)."""
+    li_f2 = [[0.0, 0.0, 0.0], [1.6, 0.0, 0.0], [-1.6, 0.0, 0.0]]
+    con, _ = _run(tmp_path, monkeypatch, [_rec(["Li", "F", "F"], li_f2, -1)], vertical_fraction=1.0)
+    assert sorted({r[0] for r in con.execute("SELECT charge FROM structures")}) == [-1, 0]
+
+
+def test_stage_record_wins_over_vertical(tmp_path, monkeypatch):
+    """When a vertical deck and a stage record are the same deck, the stage record's provenance is kept."""
+    li_f = [[0.0, 0.0, 0.0], [1.6, 0.0, 0.0]]
+    recs = [_rec(["Li", "F"], li_f, 0, params={"src": "a"}), _rec(["Li", "F"], li_f, 1, params={"src": "b"})]
+    con, _ = _run(tmp_path, monkeypatch, recs, vertical_fraction=1.0)
+    row = con.execute("SELECT parent_id, params FROM structures WHERE charge=1").fetchone()
+    assert row[0] is None and json.loads(row[1]) == {"src": "b"}
