@@ -138,6 +138,11 @@ def _q_ok(ctx, q, names=None, delta_q=0):
     lo, hi = ctx.cfg.get("charge", {}).get("range", (-2, 2))
     if not lo <= q <= hi:
         return False
+    if names is not None and int(delta_q) <= -2:
+        n_li = sum(1 for n in names if ctx.cat[n].kind == "cation"
+                   or "Li" in ctx.cat[n].smiles or "Na" in ctx.cat[n].smiles)
+        if n_li < -int(delta_q):
+            return False  # a multi-electron reduction needs one Li/Na per added electron
     if names is None or int(delta_q) >= 0:
         return True
     if any(ctx.cat[n].kind == "cation" or "Li" in ctx.cat[n].smiles or "Na" in ctx.cat[n].smiles
@@ -348,6 +353,29 @@ def monomer(ctx, scfg, delta_q):
                 n += 1
 
 
+def atoms(ctx, scfg, delta_q):
+    """Isolated-atom reference decks (delta_q 0 only): every element in the configured species, q = -1..+1."""
+    if int(delta_q) != 0:
+        return
+    els = set()
+    for kind in ("cations", "anions", "solvents"):
+        for name in ctx.cfg["species"].get(kind, []):
+            mol = Chem.MolFromSmiles(ctx.cat[name].smiles)
+            if mol is not None:
+                els.update(a.GetSymbol() for a in Chem.AddHs(mol).GetAtoms())
+    lo, hi = ctx.cfg.get("charge", {}).get("range", (-2, 2))
+    n = 0
+    for el in sorted(els):
+        for c in (-1, 0, 1):
+            if not lo <= c <= hi or n_electrons([el], c) == 0:
+                continue  # H+ has no electrons
+            if n >= _limit(scfg):
+                return
+            yield dict(symbols=[el], positions=np.zeros((1, 3)), charge=c, sampler="atoms",
+                       composition=el, job="sp", bs=False, params={"kind": "atom", "element": el})
+            n += 1
+
+
 def _normal_mode(symbols, positions, hessian, T_K, rng, max_move=0.5, tries=100):
     """Classical harmonic sample: q_k ~ N(0, kT/lambda_k), displacement M^-1/2 sum q_k L_k (bohr -> A)."""
     if hessian is None:
@@ -495,6 +523,28 @@ def cluster(ctx, scfg, delta_q):
             yield _rec(ctx, cl["symbols"], moved, q, "cluster", combo, "sp", False,
                        {"combo": list(combo), "kind": "dilate", "factor": float(f)} | _etemp(cl))
             n += 1
+        cats = [(name, idxs) for name, idxs in cl["members"] if ctx.cat[name].kind == "cation"]
+        if len(cats) != 1:
+            continue
+        cat_pos = _com(cl["positions"], cats[0][1])
+        for f in scfg.get("m_stretch", [1.05, 1.10]):
+            if n >= _limit(scfg):
+                return
+            moved = cl["positions"].copy()
+            for name, idxs in cl["members"]:
+                if ctx.cat[name].kind == "cation":
+                    continue
+                u = _com(cl["positions"], idxs) - cat_pos
+                d = float(np.linalg.norm(u))
+                if d < 1e-8:
+                    continue
+                # GFN2 puts M-O ~0.1 A (Li) to ~0.3 A (Na) shorter than DFT: stretch the ionic contact
+                moved[idxs] += (float(f) - 1.0) * _min_between(cl["positions"], cats[0][1], idxs) * u / d
+            if _too_close(cl["symbols"], moved, 0.7):
+                continue
+            yield _rec(ctx, cl["symbols"], moved, q, "cluster", combo, "sp", False,
+                       {"combo": list(combo), "kind": "m_stretch", "factor": float(f)} | _etemp(cl))
+            n += 1
 
 
 def _rattle(positions, sigma, rng, min_dist=0.7, tries=100):
@@ -506,6 +556,14 @@ def _rattle(positions, sigma, rng, min_dist=0.7, tries=100):
         if d.min() >= min_dist:
             return pos
     return None
+
+
+def _rattled(x, sigma, rng, ok=None):
+    """Rattled copy of a path frame when it passes ok, else None (the caller keeps the exact frame)."""
+    if sigma <= 0:
+        return None
+    pos = _rattle(np.asarray(x, float), sigma, rng)
+    return pos if pos is not None and (ok is None or ok(pos)) else None
 
 
 def _bond_candidates(ctx, cl, combo, max_bonds, rng):
@@ -532,6 +590,7 @@ def bond_scan1(ctx, scfg, delta_q):
     bs = bool(scfg.get("bs", False))
     npts = int(scfg.get("n_points", 12))
     max_bonds = int(scfg.get("max_bonds_per_cluster", 10 ** 9))
+    sigma = float(scfg.get("path_rattle_A", 0.07))
     n = 0
     for combo in _combos(ctx):
         getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))
@@ -553,10 +612,12 @@ def bond_scan1(ctx, scfg, delta_q):
                 if n >= _limit(scfg):
                     return
                 frame = np.asarray(frame, float)
-                yield _rec(ctx, symbols, frame, q, "bond_scan1", combo, "sp", bs,
+                rr = _rattled(frame, sigma, rng) if k % 2 else None
+                yield _rec(ctx, symbols, frame if rr is None else rr, q, "bond_scan1", combo, "sp", bs,
                            {"bond": [i, j], "elements": [symbols[i], symbols[j]],
                             "r_A": float(np.linalg.norm(frame[i] - frame[j])), "index": k,
-                            "E_xtb_eV": float(energy)} | _etemp(cl, r))
+                            "E_xtb_eV": float(energy)}
+                           | ({"rattle_A": sigma} if rr is not None else {}) | _etemp(cl, r))
                 n += 1
 
 
@@ -593,6 +654,7 @@ def bond_scan2(ctx, scfg, delta_q):
     bs = bool(scfg.get("bs", False))
     npts = int(scfg.get("n_points", 12))
     max_bonds = int(scfg.get("max_bonds_per_cluster", 10 ** 9))
+    sigma = float(scfg.get("path_rattle_A", 0.07))
     n = 0
     for combo in _combos(ctx):
         getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))
@@ -633,21 +695,32 @@ def bond_scan2(ctx, scfg, delta_q):
             images = [Atoms(symbols, positions=pos)] + [Atoms(symbols, positions=pos) for _ in range(npts - 2)] \
                 + [Atoms(symbols, positions=end)]
             _idpp(images)
+
+            def ok_at(y, key=key):
+                if _too_close(symbols, y, 0.7):
+                    return False  # two atoms pushed together
+                return not any(np.linalg.norm(y[a] - y[b]) > 1.3 * np.linalg.norm(pos[a] - pos[b])
+                               for a, b in bonds if (a, b) != key)  # another bond torn
+
+            def ok_far(y):
+                return ok_at(y) and not (_bonds(symbols, y) - bonds)  # no new bond to a spectator
+
+            e = 0  # emission index within this path: odd frames carry thermal noise
             for k, im in enumerate(images[1:], 1):  # image 0 is the cluster itself (cluster opt deck)
                 if n >= _limit(scfg):
                     return
                 x = im.get_positions()
-                if _too_close(symbols, x, 0.7):
-                    continue  # interpolation pushed two atoms together
-                if any(np.linalg.norm(x[a] - x[b]) > 1.3 * np.linalg.norm(pos[a] - pos[b])
-                       for a, b in bonds if (a, b) != key):
-                    continue  # interpolation tore another bond
-                yield _rec(ctx, symbols, x, q, "bond_scan2", combo, "sp", bs,
+                if not ok_at(x):
+                    continue
+                rr = _rattled(x, sigma, rng, ok_at) if e % 2 else None
+                yield _rec(ctx, symbols, x if rr is None else rr, q, "bond_scan2", combo, "sp", bs,
                            {"bond": [i, j], "elements": [symbols[i], symbols[j]], "method": "idpp",
                             "r_A": float(np.linalg.norm(x[i] - x[j])), "index": k,
                             "ring": bool(mol.GetBondBetweenAtoms(li, lj).IsInRing()),
                             "endpoint": endpoint}
+                           | ({"rattle_A": sigma} if rr is not None else {})
                            | ({"E_xtb_end_eV": float(r["E_eV"])} if endpoint == "xtb" else {}) | _etemp(cl, r))
+                e += 1
                 n += 1
             if not mol.GetBondBetweenAtoms(li, lj).IsInRing():  # far points off a ring bond are meaningless
                 vec = end[j] - end[i]
@@ -660,18 +733,16 @@ def bond_scan2(ctx, scfg, delta_q):
                         return
                     x = end.copy()
                     x[side] += (dist - d_end) * vec / d_end  # j-side fragment moved rigidly along i->j
-                    if _too_close(symbols, x, 0.7):
-                        continue  # far point pushed two atoms together
-                    if any(np.linalg.norm(x[a] - x[b]) > 1.3 * np.linalg.norm(pos[a] - pos[b])
-                           for a, b in bonds if (a, b) != key):
-                        continue  # far point tore another bond
-                    if _bonds(symbols, x) - bonds:
-                        continue  # far point bonded the moved fragment to a spectator
-                    yield _rec(ctx, symbols, x, q, "bond_scan2", combo, "sp", bs,
+                    if not ok_far(x):
+                        continue
+                    rr = _rattled(x, sigma, rng, ok_far) if e % 2 else None
+                    yield _rec(ctx, symbols, x if rr is None else rr, q, "bond_scan2", combo, "sp", bs,
                                {"bond": [i, j], "elements": [symbols[i], symbols[j]], "method": "far",
                                 "r_A": float(np.linalg.norm(x[i] - x[j])), "index": k,
                                 "ring": False, "endpoint": endpoint, "far": True}
+                               | ({"rattle_A": sigma} if rr is not None else {})
                                | ({"E_xtb_end_eV": float(r["E_eV"])} if endpoint == "xtb" else {}) | _etemp(cl, r))
+                    e += 1
                     n += 1
 
 
@@ -694,7 +765,7 @@ def _carbonyl_oxygens(mol, c):
             if b.GetBondType() == Chem.BondType.DOUBLE and b.GetOtherAtom(mol.GetAtomWithIdx(c)).GetSymbol() == "O"}
 
 
-def _reaction_candidates(ctx, cl, combo, extra_radicals=()):
+def _reaction_candidates(ctx, cl, combo, extra_radicals=(), oxidised=False):
     """[(template, pairs, ranges)] over member pairs within 6 A; pairs[k] carries ranges[k] = (start, target).
     extra_radicals: cluster atoms to treat as radical centres (charge-derived, see _charge_radicals)."""
     infos, cat_infos = [], []
@@ -778,6 +849,36 @@ def _reaction_candidates(ctx, cl, combo, extra_radicals=()):
                         dz = float(np.linalg.norm(pos[z] - pos[x]))
                         ztgt = 1.0 * (rcov[z] + rcov[x])
                         cand.append(("transfer", [(y, x), (z, x)], [(rxy, tgt), (dz, ztgt)]))
+    # h_transfer_ox (oxidised clusters only): an ethylene H of A moves to a carbonyl O of a neutral member
+    # or an F/O/N of an anion member. Borodin & Xing, PCCP 14, 12838 (2012): in EC radical cation dimers the
+    # ethylene H is abstracted by the carbonyl O of a neighbouring EC (exothermic). Xing et al., J. Phys.
+    # Chem. A 115, 13896 (2011): oxidised PC-PF6 forms HF + PF5 in the first step.
+    if oxidised:
+        for a in infos:
+            hs = [(a["idxs"][h.GetIdx()], a["idxs"][c.GetIdx()])
+                  for c in a["mol"].GetAtoms() if c.GetSymbol() == "C"
+                  for h in c.GetNeighbors() if h.GetSymbol() == "H"]
+            for h, c in hs:
+                rch = float(np.linalg.norm(pos[c] - pos[h]))
+                for b in infos:
+                    if b is a or np.linalg.norm(_com(pos, a["idxs"]) - _com(pos, b["idxs"])) > 6.0:
+                        continue
+                    sp_b = ctx.cat[b["name"]]
+                    if sp_b.kind == "anion":
+                        accept = [k for k, at in enumerate(b["mol"].GetAtoms())
+                                  if at.GetSymbol() in ("F", "O", "N")]
+                    elif int(sp_b.charge) == 0:
+                        accept = [k for k, at in enumerate(b["mol"].GetAtoms())
+                                  if at.GetSymbol() == "O" and any(
+                                      bd.GetBondType() == Chem.BondType.DOUBLE for bd in at.GetBonds())]
+                    else:
+                        continue
+                    for k in accept:
+                        y = b["idxs"][k]
+                        dyh = float(np.linalg.norm(pos[y] - pos[h]))
+                        cand.append(("h_transfer_ox", [(c, h), (y, h)],
+                                     [(rch, 1.05 * (rcov[c] + rcov[h]) + 1.2),
+                                      (dyh, 1.05 * (rcov[y] + rcov[h]))]))
     # radical_couple: two radical centres of different members
     for ai, a in enumerate(infos):
         ra = a["rad"]
@@ -880,6 +981,8 @@ def reaction(ctx, scfg, delta_q):
     npts = int(scfg.get("n_points", 14))
     k_peak = int(scfg.get("k_peak", 2))
     max_per = int(scfg.get("max_per_cluster", 10 ** 9))
+    sigma = float(scfg.get("path_rattle_A", 0.07))
+    peak_n = int(scfg.get("peak_rattle_n", 2))
     n = 0
     for combo in _combos(ctx):
         getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))
@@ -888,7 +991,7 @@ def reaction(ctx, scfg, delta_q):
             continue
         rng = _stream(ctx, "reaction", combo, q)
         extra = _charge_radicals(ctx, cl, q, delta_q)
-        cand = [c for c in _reaction_candidates(ctx, cl, combo, extra) if c[0] in templates]
+        cand = [c for c in _reaction_candidates(ctx, cl, combo, extra, int(delta_q) > 0) if c[0] in templates]
         cand = _pick(cand, max_per, rng)
         for template, pairs, ranges in cand:
             if n >= _limit(scfg):
@@ -904,14 +1007,33 @@ def reaction(ctx, scfg, delta_q):
                 continue
             p = 1 + int(np.argmax(E[1:-1]))
             keep = sorted({len(E) - 1} | set(range(max(1, p - k_peak), min(p + k_peak, len(E) - 2) + 1)))
+            e = 0  # emission index within this path: odd frames carry thermal noise
             for k in keep:
                 if n >= _limit(scfg):
                     return
-                yield _rec(ctx, cl["symbols"], r["frames"][k], q, "reaction", combo, "sp", bs,
-                           {"template": template, "atoms": atoms, "pairs": [list(x) for x in pairs],
-                            "ranges": [list(x) for x in ranges],
+                x = np.asarray(r["frames"][k], float)
+                rr = _rattled(x, sigma, rng) if e % 2 else None
+                yield _rec(ctx, cl["symbols"], x if rr is None else rr, q, "reaction", combo, "sp", bs,
+                           {"template": template, "atoms": atoms, "pairs": [list(pr) for pr in pairs],
+                            "ranges": [list(rg) for rg in ranges],
                             "index": int(k), "peak_index": int(p), "is_peak": bool(k == p),
-                            "charge_radicals": list(extra), "E_xtb_eV": float(E[k])} | _etemp(cl, r))
+                            "charge_radicals": list(extra), "E_xtb_eV": float(E[k])}
+                           | ({"rattle_A": sigma} if rr is not None else {}) | _etemp(cl, r))
+                e += 1
+                n += 1
+            peak = np.asarray(r["frames"][p], float)
+            for j in range(peak_n if sigma > 0 else 0):
+                if n >= _limit(scfg):
+                    return
+                rr = _rattle(peak, sigma, rng)
+                if rr is None:
+                    continue
+                yield _rec(ctx, cl["symbols"], rr, q, "reaction", combo, "sp", bs,
+                           {"template": template, "atoms": atoms, "pairs": [list(pr) for pr in pairs],
+                            "ranges": [list(rg) for rg in ranges],
+                            "index": int(p), "peak_index": int(p), "is_peak": False, "peak_rattle": j,
+                            "rattle_A": sigma, "charge_radicals": list(extra), "E_xtb_eV": float(E[p])}
+                           | _etemp(cl, r))
                 n += 1
 
 
@@ -952,6 +1074,7 @@ def reaction2(ctx, scfg, delta_q):
     npts = int(scfg.get("n_points", 14))
     max_per = int(scfg.get("max_per_cluster", 10 ** 9))
     free_opt = bool(scfg.get("free_opt", True))
+    sigma = float(scfg.get("path_rattle_A", 0.07))
     n = 0
     for combo in _combos(ctx):
         getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))
@@ -964,7 +1087,7 @@ def reaction2(ctx, scfg, delta_q):
         members = [ix for _, ix in cl["members"]]
         b0 = _bonds(symbols, pos)
         extra = _charge_radicals(ctx, cl, q, delta_q)
-        cand = [c for c in _reaction_candidates(ctx, cl, combo, extra) if c[0] in templates]
+        cand = [c for c in _reaction_candidates(ctx, cl, combo, extra, int(delta_q) > 0) if c[0] in templates]
         cand = _pick(cand, max_per, rng)
         for template, pairs, ranges in cand:
             if n >= _limit(scfg):
@@ -993,20 +1116,27 @@ def reaction2(ctx, scfg, delta_q):
             images = [Atoms(symbols, positions=pos)] + [Atoms(symbols, positions=pos) for _ in range(npts - 2)] \
                 + [Atoms(symbols, positions=end)]
             _idpp(images)
+
+            def ok_at(y):
+                if _too_close(symbols, y, 0.7):
+                    return False  # two atoms pushed together
+                return not any(np.linalg.norm(y[i] - y[j]) > 1.3 * np.linalg.norm(pos[i] - pos[j])
+                               for i, j in b0 - broken)  # a surviving bond stretched far beyond its cluster length
+
+            e = 0  # emission index within this path: odd frames carry thermal noise
             for k, im in enumerate(images[1:], 1):  # image 0 is the cluster itself (cluster opt deck)
                 if n >= _limit(scfg):
                     return
                 x = im.get_positions()
-                if _too_close(symbols, x, 0.7):
-                    continue  # interpolation pushed two atoms together
-                if any(np.linalg.norm(x[i] - x[j]) > 1.3 * np.linalg.norm(pos[i] - pos[j])
-                       for i, j in b0 - broken):
-                    continue  # a surviving bond stretched far beyond its cluster length
-                yield _rec(ctx, symbols, x, q, "reaction2", combo, "sp", bs,
+                if not ok_at(x):
+                    continue
+                rr = _rattled(x, sigma, rng, ok_at) if e % 2 else None
+                yield _rec(ctx, symbols, x if rr is None else rr, q, "reaction2", combo, "sp", bs,
                            {"template": template, "atoms": atoms, "pairs": [list(p) for p in pairs],
                             "index": k, "endpoint": endpoint, "charge_radicals": list(extra),
                             "E_xtb_end_eV": float(r["E_eV"])}
-                           | _etemp(cl, r))
+                           | ({"rattle_A": sigma} if rr is not None else {}) | _etemp(cl, r))
+                e += 1
                 n += 1
 
 
@@ -1017,6 +1147,7 @@ def hop(ctx, scfg, delta_q):
     cation is closer than 0.75 x covalent-radius sum to any atom are dropped."""
     npts = int(scfg.get("n_points", 10))
     max_per = int(scfg.get("max_per_cluster", 10 ** 9))
+    sigma = float(scfg.get("path_rattle_A", 0.07))
     n = 0
     for combo in _combos(ctx):
         getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))
@@ -1066,6 +1197,11 @@ def hop(ctx, scfg, delta_q):
                 if best < 0.5:
                     r3 = None  # (nearly) on the d1-d2 axis: it would not pin the cation
                 cur = pos.copy()
+
+                def ok_at(y, m=m, rest=rest, rcov=rcov):
+                    return not (np.linalg.norm(y[rest] - y[m], axis=1) < 0.75 * (rcov[m] + rcov[rest])).any()
+
+                e = 0  # emission index within this path: odd frames carry thermal noise
                 for t in np.linspace(0.0, 1.0, npts)[1:]:  # t=0 is the relaxed cluster (its opt deck)
                     if n >= _limit(scfg):
                         return
@@ -1088,15 +1224,17 @@ def hop(ctx, scfg, delta_q):
                     dev = float(np.linalg.norm(_kabsch(cur, pos, rest)[m] - pt))
                     if dev > HOP_MAX_DEV_A:
                         continue  # e.g. mirror image across the reference plane: not on the intended path
-                    dm = np.linalg.norm(cur[rest] - cur[m], axis=1)
-                    if (dm < 0.75 * (rcov[m] + rcov[rest])).any():
+                    if not ok_at(cur):
                         continue  # cation runs into an atom: no useful PES point
-                    yield _rec(ctx, symbols, cur, q, "hop", combo, "sp", False,
+                    rr = _rattled(cur, sigma, rng, ok_at) if e % 2 else None
+                    yield _rec(ctx, symbols, cur if rr is None else rr, q, "hop", combo, "sp", False,
                                {"kind": "hop", "cation": cation, "cation_index": int(m), "from_donor": d1,
                                 "to_donor": int(d2), "t": float(t),
                                 "d_from_A": float(np.linalg.norm(cur[m] - cur[d1])),
                                 "d_to_A": float(np.linalg.norm(cur[m] - cur[d2])),
-                                "path_dev_A": dev, "ref3": r3} | _etemp(cl, r))
+                                "path_dev_A": dev, "ref3": r3}
+                               | ({"rattle_A": sigma} if rr is not None else {}) | _etemp(cl, r))
+                    e += 1
                     n += 1
         if bool(scfg.get("exchange", True)):
             emax = int(scfg.get("exchange_max_per_cluster", 2))
@@ -1116,20 +1254,28 @@ def hop(ctx, scfg, delta_q):
                 if not r.get("ok"):
                     continue
                 kmax = min(_until_jump(r["E_eV"]), _until_apart(cl, r["frames"]))
+                others = [k2 for k2 in range(len(symbols)) if k2 != m]
+                rcov_others = 0.75 * (_cov(symbols, m) + np.array([_cov(symbols, k2) for k2 in others]))
+
+                def ok_at(y, m=m, others=others, rcov_others=rcov_others):
+                    return not (np.linalg.norm(y[others] - y[m], axis=1) < rcov_others).any()
+
+                e = 0  # emission index within this path: odd frames carry thermal noise
                 for k, (frame, energy) in enumerate(zip(r["frames"][:kmax], r["E_eV"][:kmax])):
                     if n >= _limit(scfg):
                         return
                     if k == 0:
                         continue  # k=0 is the relaxed cluster (its opt deck)
                     frame = np.asarray(frame, float)
-                    others = [k2 for k2 in range(len(symbols)) if k2 != m]
-                    if (np.linalg.norm(frame[others] - frame[m], axis=1)
-                            < 0.75 * (_cov(symbols, m) + np.array([_cov(symbols, k2) for k2 in others]))).any():
+                    if not ok_at(frame):
                         continue  # cation runs into an atom, as in the hop guard
-                    yield _rec(ctx, symbols, frame, q, "hop", combo, "sp", False,
+                    rr = _rattled(frame, sigma, rng, ok_at) if e % 2 else None
+                    yield _rec(ctx, symbols, frame if rr is None else rr, q, "hop", combo, "sp", False,
                                {"kind": "exchange_out", "cation_index": int(m), "donor": int(d),
                                 "r_A": float(np.linalg.norm(frame[m] - frame[d])), "index": k,
-                                "E_xtb_eV": float(energy)} | _etemp(cl, r))
+                                "E_xtb_eV": float(energy)}
+                               | ({"rattle_A": sigma} if rr is not None else {}) | _etemp(cl, r))
+                    e += 1
                     n += 1
 
 
@@ -1254,5 +1400,5 @@ def nanoreactor(ctx, scfg, delta_q):
             n += 1
 
 
-SAMPLERS = {"monomer": monomer, "pair_scan": pair_scan, "cluster": cluster, "cluster_md": cluster_md, "bond_scan1": bond_scan1, "bond_scan2": bond_scan2,
+SAMPLERS = {"monomer": monomer, "atoms": atoms, "pair_scan": pair_scan, "cluster": cluster, "cluster_md": cluster_md, "bond_scan1": bond_scan1, "bond_scan2": bond_scan2,
             "reaction": reaction, "reaction2": reaction2, "hop": hop, "nanoreactor": nanoreactor}
