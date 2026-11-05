@@ -5,12 +5,12 @@ charge: {delta_q: [0, -1, 1, -2], mult_offsets: [0, 2], range: [-2, 2], vertical
 g16: {nproc: 16, mem: 32GB, pop_always: true}
 limits: {max_atoms: 60, dedup_A: 0.03}
 xtb: {n_max_process: 2, threads: 2, timeout_s: 1800}
-cluster: {min_components: 1, max_components: {0: 3, 1: 4, 2: 3}, max_cations: 2, max_combos: 50, cation_weights: [0.2, 0.7, 0.1], m_stretch: [1.05, 1.10]}
+cluster: {min_components: 1, max_components: {0: 3, 1: 4, 2: 3}, max_cations: 2, max_combos: 50, cation_weights: [0.2, 0.7, 0.1]}
 samplers:
   monomer: {on: true, n_normal_mode: 10, n_distort: 5, T_K: 500, high_spin_fraction: 0.1}
   atoms: {on: true, high_spin_fraction: 1.0}
   pair_scan: {on: true, max_pairs: 40, n_orient: 3, scales: [0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.5, 2.0, 3.0, 4.0], high_spin_fraction: 0.1}
-  cluster: {on: true, n_distort: 5, rattle_A: [0.05, 0.15], dilate: [0.9, 1.1, 1.25], high_spin_fraction: 0.1}
+  cluster: {on: true, n_distort: 5, rattle_A: [0.05, 0.15], dilate: [0.9, 1.1, 1.25], m_stretch: [1.05, 1.10], high_spin_fraction: 0.1}
   cluster_md: {on: true, n_solvent: {Li: [3, 4, 5], Na: [4, 5, 6]}, with_anion: true, T_K: [300, 600], time_ps: 5, equil_ps: 2, dump_fs: 50, n_frames: 10, max_clusters: 10, max_atoms: 100, high_spin_fraction: 0.1}
   bond_scan1: {on: true, n_points: 8, max_bonds_per_cluster: 6, bs: true, high_spin_fraction: 1.0, path_rattle_A: 0.07}
   bond_scan2: {on: true, n_points: 8, max_bonds_per_cluster: 6, bs: true, far_A: [4.0, 5.0], high_spin_fraction: 1.0, path_rattle_A: 0.07}

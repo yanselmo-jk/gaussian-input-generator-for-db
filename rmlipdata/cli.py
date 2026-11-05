@@ -229,7 +229,7 @@ def generate(cfg, only=None, dry=False):
 
         q0 = int(rec["charge"])
         n, base = emit(q0, rec["params"])
-        if (rec["job"] != "sp" or vertical <= 0.0 or rec["params"].get("kind") == "cation"
+        if (rec["job"] != "sp" or vertical <= 0.0 or rec["params"].get("kind") in ("cation", "atom")
                 or rec["params"].get("contact") == "rcov_sum"):
             return n  # vertical decks only for geometries that depend on charge
         u_v = int(hashlib.sha1(x + b"vert").hexdigest()[:8], 16) / 2 ** 32
