@@ -146,3 +146,16 @@ def test_xtb_scc_retry(tmp_path, monkeypatch):
     assert r["ok"] and r["etemp_K"] == 1000 and len(calls) == 2 and calls[1][-2:] == ["--etemp", "1000"]
     two = [[0, 1, 2], [3, 4, 5]]
     assert not build.fragmented(pos, two) and build.fragmented(np.array(pos) + np.array([[0, 0, 0]] * 3 + [[0, 0, -9.0]] * 3), two)
+
+
+def test_view_gjf(tmp_path):
+    from ase.io import read
+    from rmlipdata import g16
+    (tmp_path / "a.gjf").write_text(g16.deck(
+        ["O", "H", "H"], [[0, 0, 0], [0.96, 0, 0], [-0.24, 0.93, 0]], 0, 1, False, "sp", "run1-000001", 1, "1GB"))
+    out = tmp_path / "out.xyz"
+    assert cli.main(["view", str(tmp_path), "--save", str(out)]) == 0
+    atoms = read(out, format="extxyz")
+    assert len(atoms) == 3
+    assert (atoms.info["charge"], atoms.info["spin"], atoms.info["id"]) == (0, 1, "run1-000001")
+    assert cli.main(["view", "EC", "--save", str(tmp_path / "ec.xyz")]) == 0

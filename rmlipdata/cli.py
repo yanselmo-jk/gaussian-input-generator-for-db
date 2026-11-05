@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 from ase import Atoms
+from ase.io import read as ase_read
 from ase.io import write as ase_write
 from rdkit import Chem
 
@@ -217,10 +218,58 @@ def species_cmd(kind=None, group=None):
     print(f"{len(data)} species")
 
 
-def view_cmd(name, opt=False, charge=None, save=None):
-    sp = species.catalog().get(name)
-    if sp is None:
-        raise SystemExit(f"unknown species: {name}")
+def _display():
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        raise SystemExit("no display found. On WSL2 run: export DISPLAY=:0 (WSLg), "
+                         "over ssh use ssh -X, or use --save FILE.xyz")
+
+
+def _gjf_info(path):
+    """(id, charge, mult, bs) from a deck: title after the route's blank line, first 'q m' line, guess=mix."""
+    lines = Path(path).read_text().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("#"))
+    gap = next(i for i in range(start, len(lines)) if not lines[i].strip())
+    title = next(l.strip() for l in lines[gap + 1:] if l.strip())
+    m = re.search(r"^-?\d+ \d+$", "\n".join(lines), re.M)
+    if m is None:
+        raise SystemExit(f"{path}: no charge/mult line")
+    q, mult = m.group().split()
+    return title, int(q), int(mult), "guess=mix" in "\n".join(lines[:gap]).lower()
+
+
+def view_cmd(targets, opt=False, charge=None, save=None):
+    cat = species.catalog()
+    if len(targets) == 1 and targets[0] in cat:
+        return _view_species(cat[targets[0]], opt, charge, save)
+    if opt or charge is not None:
+        raise SystemExit("--opt and --charge are only valid for a species name")
+    files = []
+    for target in targets:
+        p = Path(target)
+        if p.is_dir():
+            files += sorted(p.rglob("*.gjf"))
+        elif p.is_file():
+            files.append(p)
+        else:
+            raise SystemExit(f"unknown species or file: {target}")
+    if not files:
+        raise SystemExit("no .gjf files found")
+    frames = []
+    for i, path in enumerate(files):
+        atoms = ase_read(path, format="gaussian-in")
+        title, q, mult, bs = _gjf_info(path)
+        atoms.info.update(id=title, charge=q, spin=mult, bs=bs)
+        print(f"{i}: id={title} charge={q} mult={mult} bs={bs} n_atoms={len(atoms)} {path}")
+        frames.append(atoms)
+    if save:
+        ase_write(save, frames)
+        return
+    _display()
+    from ase.visualize import view
+    view(frames)
+
+
+def _view_species(sp, opt=False, charge=None, save=None):
     charge = sp.charge if charge is None else int(charge)
     if sp.molfile:
         mol = Chem.MolFromMolFile(sp.molfile, removeHs=False)
@@ -241,9 +290,7 @@ def view_cmd(name, opt=False, charge=None, save=None):
     if save:
         ase_write(save, atoms)
         return
-    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        raise SystemExit("no display found. On WSL2 run: export DISPLAY=:0 (WSLg), "
-                         "over ssh use ssh -X, or use --save FILE.xyz")
+    _display()
     from ase.visualize import view
     view(atoms)
 
@@ -278,8 +325,9 @@ def main(argv=None):
     sp = sub.add_parser("species", help="list the species catalog")
     sp.add_argument("--kind", choices=("cation", "anion", "solvent"))
     sp.add_argument("--group")
-    v = sub.add_parser("view", help="show or save a species geometry")
-    v.add_argument("name")
+    v = sub.add_parser("view", help="show or save a species geometry or Gaussian16 decks")
+    v.add_argument("targets", nargs="+",
+                   help="species name, or .gjf files / directories of .gjf decks")
     v.add_argument("--opt", action="store_true")
     v.add_argument("--charge", type=int)
     v.add_argument("--save")
@@ -297,7 +345,7 @@ def main(argv=None):
     elif a.cmd == "species":
         species_cmd(a.kind, a.group)
     elif a.cmd == "view":
-        view_cmd(a.name, a.opt, a.charge, a.save)
+        view_cmd(a.targets, a.opt, a.charge, a.save)
     else:
         export_cmd(a.registry, a.o)
     return 0
