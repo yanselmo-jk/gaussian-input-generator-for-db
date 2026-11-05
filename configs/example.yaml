@@ -2,9 +2,9 @@ out: runs/example
 seed: 0
 species: {cations: [Li, Na], anions: [PF6, FSI, TFSI, BF4, ClO4], solvents: [EC, PC, DMC, EMC, DEC, FEC, DME]}
 charge: {delta_q: [0, -1, 1], mult_offsets: [0, 2], range: [-2, 2]}
-g16: {nproc: 16, mem: 32GB}
+g16: {nproc: 16, mem: 32GB, pop_always: true}
 limits: {max_atoms: 60}
-xtb: {threads: 4, timeout_s: 1800}
+xtb: {n_max_process: 2, threads: 2, timeout_s: 1800}
 cluster: {min_components: 1, max_components: 3, max_cations: 2, max_combos: 50}
 samplers:
   monomer: {on: true, n_normal_mode: 10, n_distort: 5, T_K: 500}

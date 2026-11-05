@@ -2,8 +2,10 @@
 
 Adapted from 9_build_automatic_reaction_search_agent/rxnagent/tools/nano/nano.py (ALPB removed: gas phase only).
 """
+import hashlib
 import json
 import os
+import pickle
 import re
 import shutil
 import subprocess
@@ -25,6 +27,8 @@ XTB_MISSING = "xtb not found on PATH: run `conda activate rmlipdata` (or conda i
 
 
 CALLS = 0  # xTB invocations since process start, shown in the generate progress line
+HITS = 0   # run_xtb results served from CACHE
+CACHE = None  # result cache directory (rmd generate sets <out>/xtb_cache); None = no cache
 
 
 def find_xtb() -> str:
@@ -37,8 +41,8 @@ def find_xtb() -> str:
 
 # from 9_build_automatic_reaction_search_agent/rxnagent/tools/nano/nano.py
 def xtb_env(threads=None) -> dict:
-    """OMP threads from the argument, then RMLIPDATA_XTB_THREADS, else 4 (16 threads oversubscribes small clusters)."""
-    n = str(threads or os.environ.get("RMLIPDATA_XTB_THREADS", "4"))
+    """OMP threads from the argument, then RMLIPDATA_XTB_THREADS, else 2 (16 threads oversubscribes small clusters)."""
+    n = str(threads or os.environ.get("RMLIPDATA_XTB_THREADS", "2"))
     env = dict(os.environ)
     env["OMP_NUM_THREADS"] = n
     env["MKL_NUM_THREADS"] = n
@@ -178,8 +182,41 @@ SCC_FAIL = "Self consistent charge iterator did not converge"
 ETEMP_RETRY_K = 1000
 
 
+def _xyz(symbols, positions):
+    return f"{len(symbols)}\n\n" + "".join(f"{s} {x:.8f} {y:.8f} {z:.8f}\n" for s, (x, y, z) in zip(symbols, positions))
+
+
 def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(), scan=None, fix=(), timeout=1800,
             etemp=None):
+    """_run_xtb behind a result cache: the key is a sha1 of the exact xtb input (mol.xyz text, job.inp text, mode,
+    charge, uhf, etemp, xtb binary path and mtime), so a rerun gets the same structures without running xtb.
+    Only successful results are stored."""
+    global HITS
+    if not CACHE:
+        return _run_xtb(symbols, positions, charge, uhf, workdir, mode, constraints, scan, fix, timeout, etemp)
+    exe = shutil.which("xtb") or ""
+    stamp = os.stat(exe).st_mtime_ns if exe else 0
+    text = (f"{mode}|{charge}|{uhf}|{etemp}|{exe}|{stamp}|{_xyz(symbols, positions)}|"
+            f"{_input(list(constraints), scan, list(fix))}")
+    key = hashlib.sha1(text.encode()).hexdigest()
+    path = Path(CACHE) / key[:2] / f"{key}.pkl"
+    if path.exists():
+        HITS += 1
+        out = pickle.loads(path.read_bytes())
+        if out.get("etemp_K") and etemp is None:
+            warnings.warn(f"xtb SCC did not converge (q={charge}, uhf={uhf}, {mode}); rerun with --etemp {ETEMP_RETRY_K}")
+        return out
+    out = _run_xtb(symbols, positions, charge, uhf, workdir, mode, constraints, scan, fix, timeout, etemp)
+    if out["ok"]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{key}.{os.getpid()}.tmp")
+        tmp.write_bytes(pickle.dumps(out))
+        os.replace(tmp, path)  # atomic: parallel generate stages may write the same key
+    return out
+
+
+def _run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(), scan=None, fix=(), timeout=1800,
+             etemp=None):
     """One GFN2 gas-phase job in a fresh temp dir under workdir, deleted afterwards. Never raises.
 
     mode: "sp" | "opt" | "hess"; scan = dict(n=int, ranges=[(r0, r1), ...]) implies an optimised scan over
@@ -194,9 +231,7 @@ def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(),
         wd = Path(workdir)
         wd.mkdir(parents=True, exist_ok=True)
         d = Path(tempfile.mkdtemp(dir=wd))
-        (d / "mol.xyz").write_text(
-            f"{len(symbols)}\n\n" + "".join(f"{s} {x:.8f} {y:.8f} {z:.8f}\n"
-                                            for s, (x, y, z) in zip(symbols, positions)))
+        (d / "mol.xyz").write_text(_xyz(symbols, positions))
         args = [find_xtb(), "mol.xyz", "--gfn", "2", "--chrg", str(charge), "--uhf", str(uhf)]
         inp = _input(list(constraints), scan, list(fix))
         if inp:

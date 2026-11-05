@@ -65,7 +65,37 @@ def _dry(cfg, cat, names):
         print(f"{name}: {k}")
 
 
+def _stage(cfg, cat, out, dq, name, put):
+    """One (delta_q, sampler) stage with its own ctx. The rng depends only on seed and sampler name and clusters
+    are seeded per (combo, q), so a stage gives the same records alone, in sequence or in parallel."""
+    ctx = _ctx(cfg, cat, out)
+    ctx.combos = _combos(cfg, cat)
+    ctx.rng = np.random.default_rng(int(cfg.get("seed", 0)) + zlib.crc32(name.encode()))
+    ctx.progress = lambda label: put(("unit", label, xtb.CALLS, xtb.HITS))
+    for rec in sample.SAMPLERS[name](ctx, cfg["samplers"][name], dq):
+        if len(rec["symbols"]) <= _max_atoms(cfg):
+            put(("rec", rec))
+
+
+def _child(i, args, q):
+    """Process target: stream stage i through q; always ends with ("end", warnings, calls, hits, traceback)."""
+    import traceback
+    put = lambda m: q.put((i,) + m)  # noqa: E731
+    xtb.CALLS = xtb.HITS = 0
+    err = None
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            _stage(*args, put)
+        except BaseException:
+            err = traceback.format_exc()
+    put(("end", [str(w.message) for w in caught], xtb.CALLS, xtb.HITS, err))
+
+
 def generate(cfg, only=None, dry=False):
+    import multiprocessing
+    import queue
+    from collections import Counter
     cat = species.catalog()
     names = [n for n, sc in cfg["samplers"].items()
              if _enabled(sc) and (not only or n in only)]
@@ -76,100 +106,136 @@ def generate(cfg, only=None, dry=False):
         raise SystemExit(xtb.XTB_MISSING)
     out = Path(cfg["out"])
     out.mkdir(parents=True, exist_ok=True)
-    threads = cfg.get("xtb", {}).get("threads", 4)
+    xcfg = cfg.get("xtb", {})
+    threads = int(xcfg.get("threads", 2))
+    nmax = max(1, int(xcfg.get("n_max_process", 2)))
     os.environ["RMLIPDATA_XTB_THREADS"] = str(threads)
+    xtb.CACHE = out / "xtb_cache"
     con = registry.connect(out / "registry.sqlite")
-    ctx = _ctx(cfg, cat, out)
-    ctx.combos = _combos(cfg, cat)
-    nproc = int(cfg.get("g16", {}).get("nproc", 16))
-    mem = cfg.get("g16", {}).get("mem", "32GB")
+    gcfg = cfg.get("g16", {})
+    nproc, mem = int(gcfg.get("nproc", 16)), gcfg.get("mem", "32GB")
+    pop_always = bool(gcfg.get("pop_always", True))
     offsets = tuple(cfg.get("charge", {}).get("mult_offsets", (0, 2)))
     added = {n: 0 for n in names}
 
     dq_list = cfg.get("charge", {}).get("delta_q", [0])
     plan = _plan(cfg, cat, names)
-    n_stages = len(dq_list) * len(names)
+    todo = [(i, dq, name) for i, (dq, name) in enumerate(((dq, n) for dq in dq_list for n in names), 1)]
+    n_stages = len(todo)
     for name in names:
         print(f"  {name}: {plan[name]} units x {len(dq_list)} delta_q", file=sys.stderr)
-    print(f"{n_stages} stages (delta_q x sampler), xtb threads {threads}", file=sys.stderr)
+    print(f"{n_stages} stages (delta_q x sampler), {nmax} at a time, xtb threads {threads} each", file=sys.stderr)
 
     tty = sys.stderr.isatty()
     start = time.time()
-    calls0 = xtb.CALLS
-    st = {"i": 0, "dq": 0, "name": "", "u": 0, "k": 0, "label": "", "new": 0, "last": 0.0, "shown": None}
+    stage, running, msgs, errors = {}, {}, Counter(), []
+    st = {"done": 0, "new": 0, "last": 0.0}
 
     def status():
         s = int(time.time() - start)
         h, s = divmod(s, 3600)
         mm, ss = divmod(s, 60)
         clock = f"{h}:{mm:02d}:{ss:02d}" if h else f"{mm:02d}:{ss:02d}"
-        return (f"[{st['i']}/{n_stages}] dq={float(st['dq']):+g} {st['name']} {st['u']}/{st['k']} {st['label']}"
-                f" | new {st['new']} | xtb {xtb.CALLS - calls0} | {clock}")
+        act = ", ".join(f"dq={float(s['dq']):+g} {s['name']} {s['u']}/{s['k']} {s['label']}".rstrip()
+                        for i, s in stage.items() if i in running)
+        calls, hits = sum(s["calls"] for s in stage.values()), sum(s["hits"] for s in stage.values())
+        return f"[{st['done']}/{n_stages}] {act} | new {st['new']} | xtb {calls} (cached {hits}) | {clock}"
 
-    def draw():
-        if tty:
-            now = time.time()
-            if now - st["last"] < 0.5:
-                return
-            st["last"] = now
-            w = max(shutil.get_terminal_size((80, 24)).columns - 1, 1)
-            sys.stderr.write("\r" + status()[:w].ljust(w))
-            sys.stderr.flush()
-        elif st["shown"] != (st["i"], st["u"]):
-            st["shown"] = (st["i"], st["u"])
-            print(status(), file=sys.stderr, flush=True)
+    def draw(force=False):
+        if not tty:
+            if force:
+                print(status(), file=sys.stderr, flush=True)
+            return
+        now = time.time()
+        if now - st["last"] < 0.5 and not force:
+            return
+        st["last"] = now
+        w = max(shutil.get_terminal_size((80, 24)).columns - 1, 1)
+        sys.stderr.write("\r" + status()[:w].ljust(w))
+        sys.stderr.flush()
 
-    def progress(label):
-        st["u"] += 1
-        st["label"] = label
-        draw()
+    def add(name, rec):
+        n = 0
+        for mult, bs in g16.spin_states(rec["symbols"], rec["charge"], offsets=offsets, bs=rec["bs"]):
+            row = dict(rec, mult=mult, bs=bs, formula=Atoms(symbols=rec["symbols"]).get_chemical_formula())
+            sid, is_new = registry.add(con, row)
+            if is_new:
+                path = out / "gjf" / name / f"{sid}.gjf"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(g16.deck(rec["symbols"], rec["positions"], rec["charge"], mult, bs,
+                                         rec["job"], sid, nproc, mem, pop_always))
+                registry.set_gjf(con, sid, path)
+                added[name] += 1
+                n += 1
+        return n
 
-    ctx.progress = progress
+    mp = multiprocessing.get_context("fork")  # children inherit catalog, config and monkeypatched samplers
+    q = mp.Queue()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
-            i = 0
-            for dq in dq_list:
-                for name in names:
-                    i += 1
-                    scfg = cfg["samplers"][name]
-                    st.update(i=i, dq=dq, name=name, u=0, k=plan[name], label="", new=0, last=0.0, shown=None)
-                    stage_start = time.time()
-                    ctx.rng = np.random.default_rng(int(cfg.get("seed", 0)) + zlib.crc32(name.encode()))
-                    for rec in sample.SAMPLERS[name](ctx, scfg, dq):
-                        if len(rec["symbols"]) > _max_atoms(cfg):
-                            continue
-                        for mult, bs in g16.spin_states(rec["symbols"], rec["charge"], offsets=offsets, bs=rec["bs"]):
-                            row = dict(rec, mult=mult, bs=bs,
-                                       formula=Atoms(symbols=rec["symbols"]).get_chemical_formula())
-                            sid, is_new = registry.add(con, row)
-                            if is_new:
-                                path = out / "gjf" / name / f"{sid}.gjf"
-                                path.parent.mkdir(parents=True, exist_ok=True)
-                                path.write_text(g16.deck(rec["symbols"], rec["positions"], rec["charge"], mult, bs,
-                                                         rec["job"], sid, nproc, mem))
-                                registry.set_gjf(con, sid, path)
-                                added[name] += 1
-                                st["new"] += 1
-                        draw()
+            while todo or running:
+                while todo and len(running) < nmax:
+                    i, dq, name = todo.pop(0)
+                    stage[i] = dict(dq=dq, name=name, u=0, k=plan[name], label="", new=0, calls=0, hits=0,
+                                    t0=time.time())
+                    running[i] = mp.Process(target=_child, args=(i, (cfg, cat, out, dq, name), q), daemon=True)
+                    running[i].start()
+                try:
+                    i, kind, *rest = q.get(timeout=1)
+                except queue.Empty:
+                    for i, p in list(running.items()):
+                        if p.exitcode not in (None, 0):  # killed (e.g. out of memory) before sending "end"
+                            del running[i]
+                            st["done"] += 1
+                            s = stage[i]
+                            errors.append(f"dq={float(s['dq']):+g} {s['name']}: process died, exit code {p.exitcode}")
+                    draw()
+                    continue
+                s = stage[i]
+                if kind == "unit":
+                    s["u"] += 1
+                    s["label"], s["calls"], s["hits"] = rest
+                    draw(force=True)
+                elif kind == "rec":
+                    n = add(s["name"], rest[0])
+                    s["new"] += n
+                    st["new"] += n
+                    draw()
+                else:
+                    w, s["calls"], s["hits"], err = rest
+                    msgs |= Counter(w)  # max per message: stages rebuild the same clusters, warn once
+                    running.pop(i).join()
+                    st["done"] += 1
                     con.commit()
+                    if err:
+                        errors.append(f"dq={float(s['dq']):+g} {s['name']}:\n{err}")
                     if tty:
                         sys.stderr.write("\r" + " " * max(shutil.get_terminal_size((80, 24)).columns - 1, 1) + "\r")
-                    print(f"[{i}/{n_stages}] dq={float(dq):+g} {name} done: {st['new']} new decks, "
-                          f"{time.time() - stage_start:.1f} s", file=sys.stderr, flush=True)
+                    print(f"[{i}/{n_stages}] dq={float(s['dq']):+g} {s['name']} {'FAILED' if err else 'done'}: "
+                          f"{s['new']} new decks, xtb {s['calls']} (cached {s['hits']}), "
+                          f"{time.time() - s['t0']:.1f} s", file=sys.stderr, flush=True)
+            con.commit()
             manifest(con, out)
             for name in names:
                 total = con.execute("SELECT COUNT(*) FROM structures WHERE sampler=?", (name,)).fetchone()[0]
                 print(f"{name}: {added[name]} new, {total} total")
         finally:
-            _log_warnings(out, caught)
+            for p in running.values():
+                p.terminate()
+            con.commit()
+            xtb.CACHE = None
+            _log_warnings(out, list(msgs.elements()) + [str(w.message) for w in caught])
     con.close()
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
+        raise SystemExit(f"{len(errors)} stage(s) failed; decks from the other stages are written")
 
 
 def _log_warnings(out, caught):
     """warnings.log holds one warning per line; stderr gets a short summary grouped by kind."""
     from collections import Counter
-    msgs = [re.sub(r"[ \t]+", " ", re.sub(r"\s*\n\s*", " | ", str(w.message))).strip() for w in caught]
+    msgs = [re.sub(r"[ \t]+", " ", re.sub(r"\s*\n\s*", " | ", str(m))).strip() for m in caught]
     log = Path(out) / "warnings.log"
     log.write_text("".join(m + "\n" for m in msgs))
     if not caught:

@@ -4,11 +4,15 @@
 
 1. config의 `species`를 조합해 cluster 후보를 만듦.
 2. 켜진 sampler마다 GFN2-xTB(gas phase)로 구조나 경로를 만듦.
+   - delta_q와 sampler 한 조합을 stage라 함. stage는 `xtb.n_max_process`개까지 별도 process로 동시에 실행됨.
+   - stage마다 난수가 seed와 sampler 이름으로만 정해지므로 동시 실행 수와 상관없이 같은 구조가 나옴.
 3. 구조마다 charge와 multiplicity 조합으로 늘림.
 4. 조합마다 registry에 id를 등록하고, 새 id일 때만 `.gjf`를 씀.
 5. 마지막에 `manifest.csv`를 다시 씀.
 
-실행 중 경고는 `<out>/warnings.log`에 모두 기록되고, 끝에 종류별 개수만 출력됨. 같은 config로 다시 실행하면 이미 있는 구조는 건너뜀. `--only bond_scan reaction`처럼 sampler 일부만 실행해도 cluster 구조는 같게 나옴 (cluster마다 seed가 고정됨).
+실행 중 경고는 `<out>/warnings.log`에 기록되고, 끝에 종류별 개수만 출력됨. stage마다 같은 cluster를 다시 만들어 같은 경고가 반복되므로, 여러 stage에서 나온 같은 문장은 한 stage에서 가장 많이 나온 횟수만 남김. 그래서 서로 다른 stage에서 따로 생긴 같은 문장의 경고는 덜 세어질 수 있음. 같은 config로 다시 실행하면 이미 있는 구조는 건너뜀. `--only bond_scan reaction`처럼 sampler 일부만 실행해도 cluster 구조는 같게 나옴 (cluster마다 seed가 고정됨).
+
+xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, constraint/scan 입력, charge, uhf, etemp, xtb binary 경로와 수정 시각)의 sha1임. 다시 실행하면 xtb를 돌리지 않고 같은 구조를 받아 registry에서 기존 id로 걸러짐. 실패한 계산은 저장하지 않음. xtb를 다시 돌리려면 이 폴더를 지움.
 
 ## 산출물 (`out` 폴더)
 
@@ -18,6 +22,7 @@
 | `manifest.csv` | 아직 계산하지 않은(`generated`) 입력 목록. 열: id, gjf_path, sampler, n_atoms, charge, mult, bs, job, nproc, mem |
 | `gjf/<sampler>/<id>.gjf` | Gaussian16 입력. 파일명 = registry id |
 | `species/` | 분자별 xTB 최적화 구조 cache |
+| `xtb_cache/` | xTB 결과 cache (key = xtb 입력의 sha1) |
 
 ## Config (`configs/example.yaml`)
 
@@ -30,8 +35,10 @@
 | `charge.mult_offsets` | 최저 multiplicity에 더할 값 | `[0, 2]` |
 | `charge.range` | 허용 전체 전하 범위. 벗어나면 xTB 계산 전에 건너뜀 | `[-2, 2]` |
 | `g16.nproc`, `g16.mem` | 입력의 `%nprocshared`, `%mem` (새로 만드는 입력에만 적용) | `16`, `32GB` |
+| `g16.pop_always` | opt 입력에 `pop=(npa,always)`를 넣어 매 step population을 출력함. false면 `pop=(npa)` | `true` |
 | `limits.max_atoms` | 원자 수 상한 | `60` |
-| `xtb.threads`, `xtb.timeout_s` | xtb thread 수와 job 1개 제한 시간 | `4`, `1800` |
+| `xtb.n_max_process` | 동시에 실행할 stage 수. CPU 사용량은 약 n_max_process × threads | `2` |
+| `xtb.threads`, `xtb.timeout_s` | xtb job 1개의 thread 수와 제한 시간 | `2`, `1800` |
 | `cluster.min_components`, `max_components` | cluster 하나의 분자 + 음이온 개수 범위 | `1`, `3` |
 | `cluster.max_cations` | cluster 하나의 Li+/Na+ 최대 개수 | `2` |
 | `cluster.max_combos` | 전체 조합 중 무작위로 고를 개수 | `50` |
@@ -49,6 +56,26 @@
 | `reaction` | 첨가 / 치환 / F·H 이동 경로의 pseudo-TS | `templates`, `n_points`, `k_peak`, `max_per_cluster`, `bs` | sp |
 | `hop` | Li+/Na+가 donor 원자 사이를 옮겨 가는 경로 | `n_points`, `max_per_cluster` | sp |
 | `nanoreactor` | 고온 xTB MD snapshot (기본 off) | `T_K`, `ncyc`, `every_n_frames` | sp |
+
+### sampler별로 만드는 deck
+
+xTB 구조 하나는 charge와 spin 조합 수만큼 deck(Gaussian 입력 파일)으로 늘어남.
+- **charge**: `charge.delta_q` 값마다 "형식 전하 + Δq"로 하나씩 만듦. 결과가 `charge.range` 밖이면 xTB 계산 전에 건너뜀.
+- **multiplicity**: 최저 multiplicity에 `charge.mult_offsets`를 더한 값들을 씀. 기본은 최저값과 최저값+2임. 전자 수 + 1보다 큰 multiplicity는 뺌.
+- **BS singlet**: `bs: true`인 sampler(`bond_scan`, `reaction`)에서 전자 수가 짝수인 구조에는 `guess=mix` singlet deck을 하나 더 만듦.
+- **상한**: `max_structures`는 charge와 spin으로 늘리기 전의 구조 수에 대한 상한임.
+
+| sampler | opt deck | sp deck | BS singlet |
+|---|---|---|---|
+| `monomer` | 분자와 음이온마다 xTB 최적화 구조 1개. Gaussian이 다시 최적화하며, 최적화의 모든 step이 frame이 됨 | normal-mode 변형 `n_normal_mode`개와 torsion/angle 변형 `n_distort`개. Li+/Na+는 원자 1개짜리 sp만 만들고, 2+ 상태는 만들지 않음 | 없음 |
+| `pair_scan` | 없음 | 쌍 × 방향(`n_orient`) × 거리(`scales`)마다 1개 | 없음 |
+| `cluster` | 조합마다 조립 후 xTB로 최적화한 cluster 1개 | 흔든 구조 `n_distort`개 | 없음 |
+| `bond_scan` | 없음 | bond마다 scan frame 최대 `n_points`개. energy가 급변하거나 cluster가 분리된 frame부터 뒤는 버림 | `bs: true`면 추가 |
+| `reaction` | 없음 | 경로마다 시작 frame, 끝 frame, 최고점 ±`k_peak` frame | `bs: true`면 추가 |
+| `hop` | 없음 | 경로마다 최대 `n_points`개. 양이온이 다른 원자와 겹치는 점은 버림 | 없음 |
+| `nanoreactor` | 없음 | MD trajectory에서 `every_n_frames`마다 snapshot 1개 | 없음 |
+
+opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin을 출력함. 자세한 내용은 [parsing.md](parsing.md)에 있음.
 
 ### 각 sampler의 방법
 
@@ -101,7 +128,7 @@
 ```
 %nprocshared=16
 %mem=32GB
-#p {R|U}wB97XD/gen nosymm int=ultrafine scf=(xqc,maxcycle=300) pop=(npa) iop(6/80=1) force|opt=(maxcycles=200) [guess=mix]
+#p {R|U}wB97XD/gen nosymm int=ultrafine scf=(xqc,maxcycle=300) pop=(npa) iop(6/80=1) force | pop=(npa,always) iop(6/80=1) opt=(maxcycles=200) [guess=mix]
 
 <id>
 
@@ -113,7 +140,7 @@
 
 - `R`은 closed-shell singlet에 씀. multiplicity > 1이거나 BS singlet이면 `U`.
 - `nosymm`을 써서 force가 입력 좌표계로 나옴.
-- `pop=(npa)`는 NBO natural charge, `iop(6/80=1)`은 Loewdin population을 출력하게 함.
+- `pop=(npa)`는 NBO natural charge, `iop(6/80=1)`은 Loewdin population을 출력하게 함. opt job은 `pop=(npa,always)`로 매 step population을 출력함 (`g16.pop_always: false`면 `pop=(npa)`).
 - basis는 `rmlipdata/data/basis/def2-TZVPPD.gbs`에서 구조에 있는 원소만 붙임.
   - 출처: Basis Set Exchange 0.12.
   - 포함 원소: H–Kr(Z 1–36)의 36개 원소. def2에서 이 원소들은 ECP 없이 모든 전자를 계산함.

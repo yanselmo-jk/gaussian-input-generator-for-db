@@ -15,7 +15,7 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 2. 각 step 안에서 `Input orientation:`이 나올 때마다 새 frame을 시작함.
 3. `SCF Done`과 force 표가 둘 다 있는 부분만 frame이 됨.
 4. 최적화가 끝난 뒤(`Stationary point found`) 다시 출력되는 population은 같은 좌표의 마지막 frame에 합침.
-5. opt job은 최적화의 모든 step이 frame이 됨. Gaussian은 charge를 첫 step과 수렴 후에만 출력하므로 중간 step의 charge는 NaN임.
+5. opt job은 최적화의 모든 step이 frame이 됨. 생성기가 쓰는 opt deck은 기본값(`g16.pop_always: true`)에서 `pop=(npa,always)`라서 매 step의 charge와 spin이 있음. `always` 없이 돌린 opt log는 첫 step과 수렴 후에만 population이 있어 중간 step은 NaN임.
 
 ## extxyz key
 
@@ -40,7 +40,7 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 
 - Loewdin: header는 `Lowdin Atomic Charges:`. open-shell에서도 charge만 출력하고 spin은 출력하지 않음 → open-shell `lowdin_spins`는 NaN.
 - NPA: total / Alpha / Beta block 형식 확인. NBO spin = α − β natural population. 합은 doublet 1.000, BS singlet 0.000.
-- opt: population은 첫 step과 수렴 후에만 출력됨. 중간 step의 charge와 spin은 NaN.
+- opt: 기본은 population이 첫 step과 수렴 후에만 출력됨 (t1). `pop=(npa,always)`면 매 step 출력됨: t4(t1과 같은 deck, Hangang job 1217563, 2026-11-05)에서 8개 frame 모두 Mulliken, Loewdin, NBO charge와 NBO spin이 있음. 시간 199 s (t1 157 s, 다른 node라 참고값).
 - restricted closed-shell은 세 방식 모두 spin이 0.
 - 주의: def2-TZVPPD의 diffuse 함수 때문에 Mulliken/Loewdin 값이 basis에 따라 크게 바뀜.
   - 예: Li⁰·EC의 Mulliken spin이 Li 1.499 (NBO 0.926).

@@ -8,7 +8,8 @@ BASIS_FILE = Path(__file__).parent / "data" / "basis" / "def2-TZVPPD.gbs"
 # iop(6/80=1): Loewdin population; pop=npa: NBO natural population analysis.
 # Basis file covers H-Kr (Z 1-36), all-electron in def2 (no ECP); Rb and heavier would need genecp.
 # Output formats confirmed on G16 c02 (Hangang job 1212786, 2026-11-04); see docs/parsing.md.
-ROUTE = "#p {ref}wB97XD/gen nosymm int=ultrafine scf=(xqc,maxcycle=300) pop=(npa) iop(6/80=1)"
+# opt: pop=always prints Mulliken / Loewdin / NPA at every step (Hangang G16 c02 job 1217563, 2026-11-05)
+ROUTE = "#p {ref}wB97XD/gen nosymm int=ultrafine scf=(xqc,maxcycle=300) pop=({pop}) iop(6/80=1)"
 JOB = {"sp": "force", "opt": "opt=(maxcycles=200)"}
 
 
@@ -37,14 +38,14 @@ def spin_states(symbols, charge, offsets=(0, 2), bs=False):
     return out
 
 
-def route(mult, bs, job):
-    """R for closed-shell singlet, U otherwise; BS singlet adds guess=mix."""
+def route(mult, bs, job, pop_always=True):
+    """R for closed-shell singlet, U otherwise; BS singlet adds guess=mix; opt adds pop=always unless switched off."""
     ref = "U" if (mult > 1 or bs) else "R"
-    r = ROUTE.format(ref=ref) + " " + JOB[job]
+    r = ROUTE.format(ref=ref, pop="npa,always" if job == "opt" and pop_always else "npa") + " " + JOB[job]
     return r + " guess=mix" if bs else r
 
 
-def deck(symbols, positions, charge, mult, bs, job, title, nproc=16, mem="32GB"):
+def deck(symbols, positions, charge, mult, bs, job, title, nproc=16, mem="32GB", pop_always=True):
     missing = sorted(set(symbols) - set(BASIS))
     if missing:
         raise ValueError(f"no def2-TZVPPD block for {missing} in {BASIS_FILE}")
@@ -53,5 +54,5 @@ def deck(symbols, positions, charge, mult, bs, job, title, nproc=16, mem="32GB")
         raise ValueError(f"charge {charge} / multiplicity {mult} impossible for {ne} electrons")
     atoms = "".join(f"{s:<2} {x:14.8f} {y:14.8f} {z:14.8f}\n" for s, (x, y, z) in zip(symbols, positions))
     gen = "".join(BASIS[e] for e in dict.fromkeys(symbols))
-    return (f"%nprocshared={nproc}\n%mem={mem}\n{route(mult, bs, job)}\n\n{title}\n\n"
+    return (f"%nprocshared={nproc}\n%mem={mem}\n{route(mult, bs, job, pop_always)}\n\n{title}\n\n"
             f"{charge} {mult}\n{atoms}\n{gen}\n")

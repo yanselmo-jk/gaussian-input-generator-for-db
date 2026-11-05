@@ -64,7 +64,7 @@ def _manifest_rows(path):
              str(r["bs"]), r["job"]) for r in rows}
 
 
-def test_generate_end_to_end(tmp_path):
+def test_generate_end_to_end(tmp_path, capsys):
     cfg = dict(TINY, out=str(tmp_path / "run"))
     path = tmp_path / "cfg.yaml"
     path.write_text(yaml.safe_dump(cfg))
@@ -84,9 +84,23 @@ def test_generate_end_to_end(tmp_path):
     n_before = con.execute("SELECT COUNT(*) FROM structures").fetchone()[0]
     con.close()
 
-    assert cli.main(["generate", str(path)]) == 0
+    capsys.readouterr()
+    assert cli.main(["generate", str(path)]) == 0           # rerun: xtb results come from <out>/xtb_cache
+    err = capsys.readouterr().err
+    assert sum(int(n) for n in __import__("re").findall(r"\(cached (\d+)\), ", err)) > 0
     con = registry.connect(db)
     assert con.execute("SELECT COUNT(*) FROM structures").fetchone()[0] == n_before
+    con.close()
+
+    cfg1 = dict(cfg, out=str(tmp_path / "run1"), xtb=dict(TINY["xtb"], n_max_process=1))
+    path1 = tmp_path / "cfg1.yaml"
+    path1.write_text(yaml.safe_dump(cfg1))
+    assert cli.main(["generate", str(path1)]) == 0           # one stage at a time: same ids as 2 at a time
+    con = registry.connect(tmp_path / "run1" / "registry.sqlite")
+    ids1 = {r[0] for r in con.execute("SELECT id FROM structures")}
+    con.close()
+    con = registry.connect(db)
+    assert ids1 == {r[0] for r in con.execute("SELECT id FROM structures")}
     con.close()
 
     assert cli.main(["resources", "--registry", str(db), "--nproc", "4", "--mem", "8GB",

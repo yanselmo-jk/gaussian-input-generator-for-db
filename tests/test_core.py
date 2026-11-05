@@ -33,6 +33,8 @@ def test_spin_states_and_route():
     assert g16.spin_states(s, -1) == [(2, False), (4, False)]
     assert g16.spin_states(["H"], 0) == [(2, False)]  # quartet needs 3 electrons
     assert g16.route(1, False, "sp").startswith("#p RwB97XD/gen")
+    assert "pop=(npa)" in g16.route(1, False, "sp") and "pop=(npa,always)" in g16.route(2, False, "opt")
+    assert "pop=(npa) " in g16.route(2, False, "opt", pop_always=False)
     r = g16.route(1, True, "sp")
     assert "UwB97XD" in r and "guess=mix" in r and "force" in r
     d = g16.deck(["Li", "F"], [[0, 0, 0], [0, 0, 1.6]], 0, 1, False, "sp", "t")

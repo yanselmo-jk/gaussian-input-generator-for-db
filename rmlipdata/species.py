@@ -271,9 +271,11 @@ def geometry(sp: Species, workdir, charge=None):
     if r["ok"] and "positions" in r:
         positions = np.asarray(r["positions"], float)
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(f"{len(symbols)}\n{sp.name} q={charge}\n"
-                         + "".join(f"{s} {x:.8f} {y:.8f} {z:.8f}\n"
-                                   for s, (x, y, z) in zip(symbols, positions)))
+        tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+        tmp.write_text(f"{len(symbols)}\n{sp.name} q={charge}\n"
+                       + "".join(f"{s} {x:.8f} {y:.8f} {z:.8f}\n"
+                                 for s, (x, y, z) in zip(symbols, positions)))
+        os.replace(tmp, cache)  # atomic: parallel generate stages may build the same species
         symbols, positions = _read_xyz(cache)  # same rounded floats as later cache hits, so reruns reproduce ids
     else:
         warnings.warn(f"{sp.name}: xtb opt failed, keeping force-field geometry ({r.get('err', '')[:120]})")
