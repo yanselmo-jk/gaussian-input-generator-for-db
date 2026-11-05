@@ -1,4 +1,5 @@
-"""Gaussian16 log -> frames (positions, energy, forces, Mulliken / Loewdin / NPA charges and spins) -> extxyz.
+"""Gaussian16 log -> frames (positions, energy, forces, Mulliken / Loewdin / NPA / Hirshfeld charges and spins, CM5
+charges, dipole, traceless quadrupole, HOMO energy) -> extxyz.
 
 A log is split into job steps (Link1), each step into frames at every 'Input orientation:' (route uses nosymm, so
 forces are in the same frame as the coordinates). A frame needs 'SCF Done' and a force table. A trailing segment
@@ -16,7 +17,8 @@ from ase.data import chemical_symbols
 HA_EV = 27.211386245988
 BOHR_A = 0.529177210903
 NUM = r"-?\d+\.\d+"
-POPS = ("mulliken", "lowdin", "nbo")
+POPS = ("mulliken", "lowdin", "nbo", "hirshfeld")
+DEBYE_EA = 0.20819433622  # 1 Debye in e*A
 
 STEP_SPLIT = re.compile(r"\n(?= Initial command:| Link1:  Proceeding to internal job step)")
 GEOM = re.compile(r"Input orientation:.*?-{5,}\n.*?-{5,}\n(.*?)\n\s*-{5,}", re.S)
@@ -33,6 +35,13 @@ LOWDIN = re.compile(r"^ Lowdin (?:Atomic )?Charges( and Spin Densities)?\s*:\s*$
 NPA = re.compile(r"Summary of Natural Population Analysis:")
 NPA_ROW = re.compile(rf"^\s*[A-Z][a-z]?\s+\d+\s+({NUM})\s+{NUM}\s+{NUM}\s+{NUM}\s+({NUM})\s*$")
 SPIN_SECTION = re.compile(r"(Alpha|Beta)\s+spin\s+orbitals", re.I)
+# pop=hirshfeld block, format confirmed on G16 c02 (Hangang job 1224122, 2026-11-06); S-H is 0 for closed shells
+HIRSH = re.compile(r"Hirshfeld charges, spin densities, dipoles, and CM5 charges using[^\n]*\n[^\n]*Q-CM5[^\n]*\n")
+HIRSH_ROW = re.compile(rf"^\s*\d+\s+[A-Z][a-z]?\s+({NUM})\s+({NUM})\s+{NUM}\s+{NUM}\s+{NUM}\s+({NUM})\s*$")
+DIPOLE = re.compile(rf"Dipole moment \(field-independent basis, Debye\):\n\s+X=\s*({NUM})\s+Y=\s*({NUM})\s+Z=\s*({NUM})")
+QUAD = re.compile(rf"Traceless Quadrupole moment \(field-independent basis, Debye-Ang\):\n"
+                  rf"\s+XX=\s*({NUM})\s+YY=\s*({NUM})\s+ZZ=\s*({NUM})\n\s+XY=\s*({NUM})\s+XZ=\s*({NUM})\s+YZ=\s*({NUM})")
+OCC = re.compile(r"^ +(?:Alpha|Beta) +occ\. eigenvalues --(.*)$", re.M)
 
 
 def _table(text, start, n):
@@ -90,6 +99,36 @@ def _npa(text, n):
     return blocks["total"][:, 0], spin
 
 
+def _hirsh(text, n):
+    """Last Hirshfeld block: (charges, spins), CM5 charges."""
+    m = list(HIRSH.finditer(text))
+    if not m:
+        return None, None
+    rows = []
+    for line in text[m[-1].end():].splitlines():
+        r = HIRSH_ROW.match(line)
+        if not r:
+            break
+        rows.append([float(x) for x in r.groups()])
+    if len(rows) != n:
+        return None, None
+    a = np.array(rows)
+    return (a[:, 0], a[:, 1]), a[:, 2]
+
+
+def _moments(text):
+    """Last dipole (e*A), traceless quadrupole (e*A^2: XX YY ZZ XY XZ YZ) and HOMO energy (eV, max of alpha/beta)."""
+    d, q = DIPOLE.findall(text), QUAD.findall(text)
+    occ = OCC.findall(text)
+    homo = None
+    if occ:  # the last population print holds alpha then beta lines; take the highest occupied level of both
+        last = text.rfind(" Alpha  occ. eigenvalues")
+        vals = [float(v) for line in OCC.findall(text[last:]) for v in re.findall(NUM, line)]
+        homo = max(vals) * HA_EV if vals else None
+    return (np.array([float(x) for x in d[-1]]) * DEBYE_EA if d else None,
+            np.array([float(x) for x in q[-1]]) * DEBYE_EA if q else None, homo)
+
+
 def _geom(block):
     rows = [l.split() for l in block.splitlines()]
     return [chemical_symbols[int(r[1])] for r in rows], np.array([[float(x) for x in r[3:6]] for r in rows])
@@ -115,6 +154,8 @@ def parse_step(text):
         for key, pat in (("mulliken", MULLIKEN), ("lowdin", LOWDIN)):
             fr[key] = _pop(seg, pat, n, restricted)
         fr["nbo"] = _npa(seg, n)
+        fr["hirshfeld"], fr["cm5"] = _hirsh(seg, n)
+        fr["dipole"], fr["quadrupole"], fr["homo"] = _moments(seg)
         if restricted and fr["nbo"] and fr["nbo"][1] is None:  # same rule as Mulliken/Loewdin
             fr["nbo"] = (fr["nbo"][0], np.zeros(n))
         e, f, s2 = SCF.findall(seg), FORCES.search(seg), S2.findall(seg)
@@ -123,6 +164,8 @@ def parse_step(text):
             if prev is not None and np.allclose(prev["positions"], pos, atol=1e-4):
                 for k in POPS:
                     prev[k] = fr[k] or prev[k]
+                for k in ("cm5", "dipole", "quadrupole", "homo"):
+                    prev[k] = fr[k] if fr[k] is not None else prev[k]
             continue
         fr["energy"] = float(e[-1]) * HA_EV
         fr["forces"] = np.array([[float(x) for x in l.split()[2:5]] for l in f[1].splitlines()]) * HA_EV / BOHR_A
@@ -149,13 +192,18 @@ def to_atoms(step, sid, step_idx):
             q, s = fr[p] if fr[p] else (None, None)
             at.arrays[f"{p}_charges"] = nan.copy() if q is None else q
             at.arrays[f"{p}_spins"] = nan.copy() if s is None else s
+        at.arrays["cm5_charges"] = nan.copy() if fr["cm5"] is None else fr["cm5"]
         S = (step["mult"] - 1) / 2
         last = k == len(step["frames"]) - 1
         at.info.update(id=sid, step=step_idx, frame=k, charge=step["charge"], spin=step["mult"],
                        job="opt" if is_opt else "sp", normal_termination=step["normal"],
                        converged=bool(last and (step["stationary"] if is_opt else step["normal"])),
                        s2=np.nan if fr["s2"] is None else fr["s2"],
-                       s2_dev=np.nan if fr["s2"] is None else fr["s2"] - S * (S + 1))
+                       s2_dev=np.nan if fr["s2"] is None else fr["s2"] - S * (S + 1),
+                       bs=bool(re.search(r"guess=mix", step["route"], re.I)),
+                       homo_eV=np.nan if fr["homo"] is None else fr["homo"],
+                       dipole=np.full(3, np.nan) if fr["dipole"] is None else fr["dipole"],
+                       quadrupole=np.full(6, np.nan) if fr["quadrupole"] is None else fr["quadrupole"])
         mq = fr["mulliken"]
         if mq:
             at.info["q_sum_ok"] = bool(abs(mq[0].sum() - step["charge"]) < 1e-3)
@@ -168,9 +216,13 @@ def to_atoms(step, sid, step_idx):
 
 # OMol25 Appendix A.1 quality filters (arXiv 2505.08762). Their "S2 < 0.5 / < 1.1" is read as the deviation
 # <S2> - S(S+1): an absolute bound would drop every triplet. "Metal-containing" is read as transition metal;
-# the def2-TZVPPD file here covers H-Kr, so that means Sc-Zn. Li+/Na+ clusters use the 1.1 bound.
+# the def2-TZVPPD file here covers H-Kr, so that means Sc-Zn. The 1.1 bound is kept for broken-symmetry
+# singlets (full unpairing gives a deviation of ~1); other open-shell decks use a tighter 0.25 (our choice:
+# e.g. a doublet with <S2> 1.8 is a contaminated state, not a label). A positive HOMO means the extra electron
+# is unbound (it sits in the diffuse basis tail).
 MAX_FORCE = 50.0      # eV/A, largest per-atom force
-MAX_S2_DEV = 1.1      # allows the full spin unpairing of a broken-symmetry singlet (deviation ~1)
+MAX_S2_DEV = 1.1      # broken-symmetry singlets
+MAX_S2_DEV_PURE = 0.25
 MAX_S2_DEV_TM = 0.5
 
 
@@ -179,8 +231,13 @@ def reject(at):
     if np.linalg.norm(at.get_forces(), axis=1).max() > MAX_FORCE:
         return "force"
     d = at.info.get("s2_dev", np.nan)
-    if np.isfinite(d) and d > (MAX_S2_DEV_TM if any(21 <= z <= 30 for z in at.numbers) else MAX_S2_DEV):
+    bound = MAX_S2_DEV if at.info.get("bs") else MAX_S2_DEV_PURE
+    if any(21 <= z <= 30 for z in at.numbers):
+        bound = min(bound, MAX_S2_DEV_TM)
+    if np.isfinite(d) and d > bound:
         return "s2"
+    if at.info.get("homo_eV", np.nan) > 0:
+        return "homo"
     return ""
 
 

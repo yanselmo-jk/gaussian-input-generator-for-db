@@ -33,8 +33,8 @@ def test_spin_states_and_route():
     assert g16.spin_states(s, -1) == [(2, False), (4, False)]
     assert g16.spin_states(["H"], 0) == [(2, False)]  # quartet needs 3 electrons
     assert g16.route(1, False, "sp").startswith("#p RwB97XD/gen")
-    assert "pop=(npa)" in g16.route(1, False, "sp") and "pop=(npa,always)" in g16.route(2, False, "opt")
-    assert "pop=(npa) " in g16.route(2, False, "opt", pop_always=False)
+    assert "pop=(npa,hirshfeld)" in g16.route(1, False, "sp") and "pop=(npa,hirshfeld,always)" in g16.route(2, False, "opt")
+    assert "pop=(npa,hirshfeld) " in g16.route(2, False, "opt", pop_always=False)
     r = g16.route(1, True, "sp")
     assert "UwB97XD" in r and "guess=mix" in r and "force" in r
     d = g16.deck(["Li", "F"], [[0, 0, 0], [0, 0, 1.6]], 0, 1, False, "sp", "t")
@@ -74,8 +74,46 @@ def test_parse_hangang_test_decks():
     from rmlipdata.parse import reject
     from ase.calculators.singlepoint import SinglePointCalculator
     assert reject(t1[0]) == reject(t2) == reject(t3) == ""       # OMol25 A.1 filters keep the test decks
+    assert t3.info["bs"] and not t2.info["bs"]
     t3.info["s2_dev"] = 1.2
     assert reject(t3) == "s2"
+    t2.info["s2_dev"] = 0.3                                      # contaminated doublet (non-BS bound 0.25)
+    assert reject(t2) == "s2"
+    t2.info["s2_dev"], t2.info["homo_eV"] = 0.0, 0.5             # unbound electron
+    assert reject(t2) == "homo"
+    t2.info["homo_eV"] = -5.0
     big = t2.copy()
     big.calc = SinglePointCalculator(big, energy=0.0, forces=np.full((len(big), 3), 30.0))  # |F| = 52 eV/A
     assert reject(big) == "force"
+
+
+def test_hirshfeld_moments_homo():
+    """pop=(npa,hirshfeld) log of EC+ doublet (Hangang G16 c02 job 1224122, 2026-11-06)."""
+    from rmlipdata.parse import log_atoms, DEBYE_EA
+    (a,) = log_atoms(Path(__file__).parent / "fixtures" / "h1_ec_cation_hirsh.log")
+    assert np.isclose(a.arrays["hirshfeld_charges"].sum(), 1.0, atol=1e-3)
+    assert np.isclose(a.arrays["hirshfeld_spins"].sum(), 1.0, atol=1e-3)
+    assert np.isclose(a.arrays["cm5_charges"][1], 0.409410) and np.isclose(a.arrays["cm5_charges"].sum(), 1.0, atol=1e-3)
+    assert np.allclose(a.info["dipole"], np.array([-4.2644, 0.5489, 0.1585]) * DEBYE_EA)
+    assert np.isclose(a.info["quadrupole"][0], -2.1565 * DEBYE_EA)
+    assert np.isclose(a.info["homo_eV"], -0.61773 * 27.211386245988, atol=1e-4)  # beta HOMO is the higher one
+    assert not a.info["bs"]
+
+
+def test_parse_cmd_adds_registry_group(tmp_path):
+    """rmd parse with a registry writes sampler / composition / group (= composition) into the extxyz info."""
+    import shutil
+    from ase.io import read
+    from rmlipdata import cli, registry
+    log = tmp_path / "h1_ec_cation_hirsh.log"
+    shutil.copy(Path(__file__).parent / "fixtures" / log.name, log)
+    con = registry.connect(tmp_path / "registry.sqlite")
+    con.execute("INSERT INTO structures (id, sampler, composition, status) VALUES (?, ?, ?, ?)",
+                (log.stem, "monomer", "EC1", "submitted"))
+    con.commit()
+    con.close()
+    out = tmp_path / "d.extxyz"
+    cli.parse_cmd([str(log)], str(out), db=str(tmp_path / "registry.sqlite"))
+    (a,) = read(out, ":")
+    assert a.info["group"] == "EC1" and a.info["sampler"] == "monomer"
+    assert np.isfinite(a.info["homo_eV"]) and a.arrays["cm5_charges"].shape == (len(a),)

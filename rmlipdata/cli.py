@@ -379,6 +379,11 @@ def parse_cmd(paths, out, db=None, keep_all=False):
     for log in logs:
         steps = parse.parse_log(log)
         fr = [a for i, st in enumerate(steps) for a in parse.to_atoms(st, log.stem, i)]
+        row = con.execute("SELECT sampler, composition FROM structures WHERE id=?", (log.stem,)).fetchone() \
+            if con else None
+        for a in fr:  # group = composition: split train/test by group so no cluster or path is on both sides
+            if row:
+                a.info.update(sampler=row["sampler"], composition=row["composition"], group=row["composition"])
         ok = bool(fr) and bool(steps) and all(s["normal"] for s in steps)
         failed += 0 if ok else 1
         for a in fr:
@@ -398,8 +403,9 @@ def parse_cmd(paths, out, db=None, keep_all=False):
         con.close()
     print(f"{len(logs)} logs, {len(frames)} frames, {failed} failed")
     if +dropped:
-        print(f"dropped by OMol25 filters: {dropped['force']} with a force > {parse.MAX_FORCE:g} eV/A, "
-              f"{dropped['s2']} with <S2> - S(S+1) above {parse.MAX_S2_DEV:g} ({parse.MAX_S2_DEV_TM:g} with Sc-Zn)")
+        print(f"dropped by quality filters: {dropped['force']} with a force > {parse.MAX_FORCE:g} eV/A, "
+              f"{dropped['s2']} with <S2> - S(S+1) above {parse.MAX_S2_DEV_PURE:g} ({parse.MAX_S2_DEV:g} for BS "
+              f"singlets, {parse.MAX_S2_DEV_TM:g} with Sc-Zn), {dropped['homo']} with HOMO > 0 eV")
     return missing
 
 
