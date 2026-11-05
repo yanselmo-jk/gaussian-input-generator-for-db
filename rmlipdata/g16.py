@@ -27,15 +27,15 @@ def n_electrons(symbols, charge):
 
 
 def spin_states(symbols, charge, offsets=(0, 2), bs=False):
-    """[(mult, bs)]: lowest multiplicity + offsets; even-electron systems add a broken-symmetry singlet if bs."""
+    """[(mult, bs)]: lowest multiplicity + offsets. With bs, an even-electron singlet is written only as the
+    UKS guess=mix (broken-symmetry) singlet, not also as RKS: one singlet label per geometry, as in OMol25
+    (UKS with a HOMO/LUMO-rotated guess where bonds may break). Without a broken-bond instability the UKS
+    solution returns to the restricted one."""
     n = n_electrons(symbols, charge)
     if n < 1:
         return []
     low = 1 if n % 2 == 0 else 2
-    out = [(low + o, False) for o in offsets if low + o - 1 <= n]
-    if bs and low == 1 and n >= 2:
-        out.append((1, True))
-    return out
+    return [(low + o, bool(bs) and low + o == 1) for o in offsets if low + o - 1 <= n]
 
 
 def route(mult, bs, job, pop_always=True):

@@ -62,7 +62,7 @@ xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, c
 xTB 구조 하나는 charge와 spin 조합 수만큼 deck(Gaussian 입력 파일)으로 늘어남.
 - **charge**: `charge.delta_q` 값마다 "형식 전하 + Δq"로 하나씩 만듦. 결과가 `charge.range` 밖이면 xTB 계산 전에 건너뜀.
 - **multiplicity**: 최저 multiplicity에 `charge.mult_offsets`를 더한 값들을 씀. 기본은 최저값과 최저값+2임. 전자 수 + 1보다 큰 multiplicity는 뺌.
-- **BS singlet**: `bs: true`인 sampler(`bond_scan`, `reaction`)에서 전자 수가 짝수인 구조에는 `guess=mix` singlet deck을 하나 더 만듦.
+- **BS singlet**: `bs: true`인 sampler(`bond_scan`, `reaction`)에서 전자 수가 짝수인 구조의 singlet은 R 대신 U + `guess=mix`(BS singlet)로만 만듦. 같은 구조에 singlet label이 하나만 생기게 하기 위함임. OMol25도 bond가 끊어질 수 있는 singlet을 UKS와 대칭을 깬 초기 guess로 계산함. bond가 끊어지지 않은 구조에서는 UKS 해가 R 해로 돌아옴.
 - **상한**: `max_structures`는 charge와 spin으로 늘리기 전의 구조 수에 대한 상한임.
 
 | sampler | opt deck | sp deck | BS singlet |
@@ -70,8 +70,8 @@ xTB 구조 하나는 charge와 spin 조합 수만큼 deck(Gaussian 입력 파일
 | `monomer` | 분자와 음이온마다 xTB 최적화 구조 1개. Gaussian이 다시 최적화하며, 최적화의 모든 step이 frame이 됨 | normal-mode 변형 `n_normal_mode`개와 torsion/angle 변형 `n_distort`개. Li+/Na+는 원자 1개짜리 sp만 만들고, 2+ 상태는 만들지 않음 | 없음 |
 | `pair_scan` | 없음 | 쌍 × 방향(`n_orient`) × 거리(`scales`)마다 1개 | 없음 |
 | `cluster` | 조합마다 조립 후 xTB로 최적화한 cluster 1개 | 흔든 구조 `n_distort`개 | 없음 |
-| `bond_scan` | 없음 | bond마다 scan frame 최대 `n_points`개. energy가 급변하거나 cluster가 분리된 frame부터 뒤는 버림 | `bs: true`면 추가 |
-| `reaction` | 없음 | 경로마다 시작 frame, 끝 frame, 최고점 ±`k_peak` frame | `bs: true`면 추가 |
+| `bond_scan` | 없음 | bond마다 scan frame 최대 `n_points`개. energy가 급변하거나 cluster가 분리된 frame부터 뒤는 버림 | `bs: true`면 singlet을 BS로만 |
+| `reaction` | 없음 | 경로마다 시작 frame, 끝 frame, 최고점 ±`k_peak` frame | `bs: true`면 singlet을 BS로만 |
 | `hop` | 없음 | 경로마다 최대 `n_points`개. 양이온이 다른 원자와 겹치는 점은 버림 | 없음 |
 | `nanoreactor` | 없음 | MD trajectory에서 `every_n_frames`마다 snapshot 1개 | 없음 |
 
@@ -120,7 +120,7 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
 
 - charge = 구성 성분 형식 전하의 합 + `delta_q`.
 - 최저 multiplicity는 전자 수가 짝수면 1, 홀수면 2. 여기에 `mult_offsets`를 더함.
-- `bs: true`인 sampler는 전자 수가 짝수일 때 BS(broken-symmetry) singlet(`guess=mix`)을 추가함. homolytic 절단 경로를 위한 것임.
+- `bs: true`인 sampler는 전자 수가 짝수일 때 singlet을 BS(broken-symmetry) singlet(`guess=mix`)으로만 만듦. homolytic 절단 경로를 위한 것임.
 - xTB 경로는 charge마다 따로 계산함 (uhf = 전자 수 % 2). 같은 경로를 여러 multiplicity로 계산함.
 
 ## Gaussian 입력

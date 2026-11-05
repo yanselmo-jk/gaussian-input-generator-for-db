@@ -29,7 +29,7 @@ def test_parse_opt_log(tmp_path):
 
 def test_spin_states_and_route():
     s = ["C", "O"]  # 14 electrons
-    assert g16.spin_states(s, 0, bs=True) == [(1, False), (3, False), (1, True)]
+    assert g16.spin_states(s, 0, bs=True) == [(1, True), (3, False)]  # singlet only as BS (UKS guess=mix)
     assert g16.spin_states(s, -1) == [(2, False), (4, False)]
     assert g16.spin_states(["H"], 0) == [(2, False)]  # quartet needs 3 electrons
     assert g16.route(1, False, "sp").startswith("#p RwB97XD/gen")
