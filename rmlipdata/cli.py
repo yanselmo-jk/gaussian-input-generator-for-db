@@ -52,6 +52,12 @@ def _plan(cfg, cat, names):
         scfg = cfg["samplers"][name]
         if name == "monomer":
             plan[name] = len(sp)
+        elif name == "atoms":
+            dq0 = 0 in [int(q) for q in cfg.get("charge", {}).get("delta_q", [0])]
+            elems = {a.GetSymbol() for k in ("cations", "anions", "solvents")
+                     for n in cfg["species"].get(k, [])
+                     for a in Chem.AddHs(Chem.MolFromSmiles(cat[n].smiles)).GetAtoms()}
+            plan[name] = len(elems) if dq0 else 0  # the atoms sampler only runs the delta_q 0 stage
         elif name == "pair_scan":
             plan[name] = min(npairs, int(scfg.get("max_pairs", npairs)))
         elif name == "cluster_md":
