@@ -178,11 +178,13 @@ def _save_user_row(name, smiles, charge, kind, source):
     rows = [r for r in rows if r["name"].strip() != name] + [
         dict(name=name, smiles=smiles, charge=str(charge), kind=kind, source=str(source),
              added=datetime.now().isoformat(timespec="seconds"))]
-    with open(p, "w", newline="") as f:
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["name", "smiles", "charge", "kind", "source", "added"],
                            delimiter="\t", lineterminator="\n")
         w.writeheader()
         w.writerows(rows)
+    os.replace(tmp, p)  # atomic: a crash never truncates user_species.tsv
 
 
 def add_user_species(path, name, charge=None, kind=None, force=False) -> Species:

@@ -74,8 +74,9 @@ def _stage(cfg, cat, out, dq, name, put):
     ctx.combos = _combos(cfg, cat)
     ctx.rng = np.random.default_rng(int(cfg.get("seed", 0)) + zlib.crc32(name.encode()))
     ctx.progress = lambda label: put(("unit", label, xtb.CALLS, xtb.HITS))
+    cap = int(cfg["samplers"][name].get("max_atoms", _max_atoms(cfg)))
     for rec in sample.SAMPLERS[name](ctx, cfg["samplers"][name], dq):
-        if len(rec["symbols"]) <= _max_atoms(cfg):
+        if len(rec["symbols"]) <= cap:
             put(("rec", rec))
 
 
@@ -125,7 +126,7 @@ def generate(cfg, only=None, dry=False):
     redox = float(cfg.get("charge", {}).get("redox_fraction", 1.0))
     high_spin = float(cfg.get("charge", {}).get("high_spin_fraction", 1.0))
     vertical = float(cfg.get("charge", {}).get("vertical_fraction", 0.2))
-    dedup = float(cfg.get("limits", {}).get("dedup_A", 0.1))
+    dedup = float(cfg.get("limits", {}).get("dedup_A", 0.03))
     qlo, qhi = cfg.get("charge", {}).get("range", (-2, 2))
     added = {n: 0 for n in names}
     hsfrac = {n: float(cfg["samplers"][n].get("high_spin_fraction", high_spin)) for n in names}
@@ -189,7 +190,7 @@ def generate(cfg, only=None, dry=False):
         u_hs = int(hashlib.sha1(x + b"hs").hexdigest()[:8], 16) / 2 ** 32
 
         def emit(q, params, parent=None):
-            n, first = 0, None
+            n, low_sid = 0, None
             states = g16.spin_states(rec["symbols"], q, offsets=offsets, bs=rec["bs"])
             low = min((mult for mult, _ in states), default=0)
             for mult, bs in states:
@@ -197,30 +198,38 @@ def generate(cfg, only=None, dry=False):
                     continue
                 row = dict(rec, charge=q, mult=mult, bs=bs, params=params, parent_id=parent,
                            formula=Atoms(symbols=rec["symbols"]).get_chemical_formula())
-                sid, is_new = registry.add(con, row)
-                if first is None:
-                    first = sid
-                if is_new:
-                    path = out / "gjf" / rec["job"] / name / f"{sid}.gjf"
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(g16.deck(rec["symbols"], rec["positions"], q, mult, bs,
-                                             rec["job"], sid, nproc, mem, pop_always))
+                sid = registry.make_id(row["sampler"], row["symbols"], row["positions"], q, mult, bs, row["job"])
+                if low_sid is None or mult == low:
+                    low_sid = sid
+                if registry.gjf_path(con, sid):
+                    continue  # deck already written by an earlier run
+                path = out / "gjf" / rec["job"] / name / f"{sid}.gjf"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name(path.name + ".tmp")
+                tmp.write_text(g16.deck(rec["symbols"], rec["positions"], q, mult, bs,
+                                        rec["job"], sid, nproc, mem, pop_always))
+                os.replace(tmp, path)  # deck first: a crash never leaves a registry row without its deck
+                row["gjf_path"] = str(path)
+                _, is_new = registry.add(con, row)
+                if not is_new:  # row from a crashed earlier run: fill in the deck path
                     registry.set_gjf(con, sid, path)
-                    added[name] += 1
-                    n += 1
-            return n, first
+                added[name] += 1
+                n += 1
+            return n, low_sid
 
         q0 = int(rec["charge"])
         n, base = emit(q0, rec["params"])
-        if rec["job"] != "sp" or vertical <= 0.0:
-            return n
+        if (rec["job"] != "sp" or vertical <= 0.0 or rec["params"].get("kind") == "cation"
+                or rec["params"].get("contact") == "rcov_sum"):
+            return n  # vertical decks only for geometries that depend on charge
         u_v = int(hashlib.sha1(x + b"vert").hexdigest()[:8], 16) / 2 ** 32
         if u_v >= vertical:
             return n
         symbols = rec["symbols"]
-        if q0 - 1 >= qlo and any(s in ("Li", "Na") for s in symbols):
+        formal = q0 - int(dq)
+        if q0 - 1 >= qlo and abs(q0 - 1 - formal) <= 1 and any(s in ("Li", "Na") for s in symbols):
             n += emit(q0 - 1, dict(rec["params"], vertical_dq=-1), base)[0]
-        if q0 + 1 <= qhi and any(s not in ("Li", "Na") for s in symbols):
+        if q0 + 1 <= qhi and abs(q0 + 1 - formal) <= 1 and any(s not in ("Li", "Na") for s in symbols):
             n += emit(q0 + 1, dict(rec["params"], vertical_dq=1), base)[0]
         return n
 
@@ -319,11 +328,15 @@ def manifest(con, out):
     cols = ["id", "gjf_path", "sampler", "n_atoms", "charge", "mult", "bs", "job", "nproc", "mem"]
     rows = con.execute("SELECT " + ",".join(cols[:8]) + " FROM structures WHERE status='generated' "
                        "ORDER BY sampler, id").fetchall()
+    missing = [r for r in rows if not r["gjf_path"]]
+    if missing:
+        warnings.warn(f"manifest: skipped {len(missing)} row(s) without a deck (gjf_path NULL)")
     with open(Path(out) / "manifest.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(cols)
         for r in rows:
-            w.writerow([r[k] for k in cols[:8]] + list(_link0(r["gjf_path"])))
+            if r["gjf_path"]:
+                w.writerow([r[k] for k in cols[:8]] + list(_link0(r["gjf_path"])))
 
 
 def resources_cmd(db, nproc=None, mem=None, samplers=None):
@@ -484,7 +497,10 @@ def _display():
 def _gjf_info(path):
     """(id, charge, mult, bs) from a deck: title after the route's blank line, first 'q m' line, guess=mix."""
     lines = Path(path).read_text().splitlines()
-    start = next(i for i, l in enumerate(lines) if l.startswith("#"))
+    try:
+        start = next(i for i, l in enumerate(lines) if l.startswith("#"))
+    except StopIteration:
+        raise ValueError(f"{path}: no route line") from None
     gap = next(i for i in range(start, len(lines)) if not lines[i].strip())
     title = next(l.strip() for l in lines[gap + 1:] if l.strip())
     m = re.search(r"^-?\d+ \d+$", "\n".join(lines), re.M)
@@ -514,7 +530,10 @@ def view_cmd(targets, opt=False, charge=None, save=None):
     frames = []
     for i, path in enumerate(files):
         atoms = ase_read(path, format="gaussian-in")
-        title, q, mult, bs = _gjf_info(path)
+        try:
+            title, q, mult, bs = _gjf_info(path)
+        except ValueError as exc:  # deck without a route line: message, not a traceback
+            raise SystemExit(str(exc)) from None
         atoms.info.update(id=title, charge=q, spin=mult, bs=bs)
         print(f"{i}: id={title} charge={q} mult={mult} bs={bs} n_atoms={len(atoms)} {path}")
         frames.append(atoms)
