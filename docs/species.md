@@ -79,3 +79,17 @@ rmd view EC --save ec.xyz   # 창 없이 파일로 저장
   - WSL2(WSLg): `export DISPLAY=:0`
   - ssh: `ssh -X`
   - 창 없이: `--save`
+
+생성된 Gaussian 입력(`.gjf`)도 볼 수 있음:
+
+```bash
+rmd view runs/example/gjf/hop/hop-018c6d7e1b60.gjf     # deck 하나
+rmd view a.gjf b.gjf                                   # 여러 개: ASE GUI에서 frame으로 넘겨 봄
+rmd view runs/example/gjf/reaction/                    # directory 안의 *.gjf 전체 (하위 포함, 경로 이름순)
+rmd view runs/example/gjf/hop/ --save hop.xyz          # 창 없이 extxyz 하나로 저장
+```
+
+- 열기 전에 deck마다 번호, id, charge, multiplicity, BS 여부(`guess=mix`), 원자 수, 경로를 한 줄씩 출력함.
+- `--save`로 쓴 extxyz의 각 frame에는 `id`, `charge`, `spin`(= multiplicity), `bs`가 들어감.
+- directory는 파일 이름(= id) 순서로 열림. id가 구조의 hash라서 scan 경로(`bond_scan`, `reaction`, `hop`)가 경로 순서대로 나오지 않음.
+- `--opt`, `--charge`는 분자 이름에만 쓸 수 있음.

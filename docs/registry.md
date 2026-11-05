@@ -16,7 +16,7 @@
 | `charge`, `mult` | 전하, multiplicity |
 | `bs` | BS singlet 여부 (0/1) |
 | `job` | `sp` 또는 `opt` |
-| `params` | sampler별 상세 정보. JSON 문자열 (scan 좌표, 경로 index, template, `is_peak` 등) |
+| `params` | sampler별 상세 정보. JSON 문자열 (scan 좌표, 경로 index, template, `is_peak` 등). xTB SCC가 수렴하지 않아 `--etemp 1000`으로 다시 돌린 구조에는 `xtb_etemp_K: 1000`이 붙음 |
 | `gjf_path`, `log_path` | 입력 파일과 log 파일 경로 |
 | `status` | `generated` (입력만 있음) → `parsed` (log 읽음) 또는 `failed` (비정상 종료) |
 | `created` | 생성 시각 |

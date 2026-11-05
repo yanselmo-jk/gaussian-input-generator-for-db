@@ -36,11 +36,12 @@ log 파일명은 `.gjf`와 같게 유지해야 함 (`<id>.gjf` → `<id>.log`).
 | `rmd resources --registry DB [--nproc N] [--mem 64GB] [--sampler ...]` | 이미 만든 입력의 `%nprocshared`/`%mem` 변경 |
 | `rmd species [--kind ...] [--group ...]` | 지원 분자 목록 |
 | `rmd view NAME [--opt] [--save FILE]` | 분자 구조를 ASE GUI로 보기 |
+| `rmd view DECK.gjf... \| DIR [--save FILE]` | 생성된 Gaussian 입력의 구조를 ASE GUI로 보기 (여러 개면 frame으로 넘겨 봄) |
 | `rmd add-species FILE --name NAME [--charge Q]` | `.mol`/`.mol2`/`.pdb`/`.xyz`로 분자 추가 |
 
 ## 상세 설명
 
 - [docs/generation.md](docs/generation.md): config, sampler, charge/multiplicity, Gaussian 입력
-- [docs/species.md](docs/species.md): 지원 분자, 분자 추가, 구조 보기
+- [docs/species.md](docs/species.md): 지원 분자, 분자 추가, 구조 보기 (분자, 생성된 `.gjf`)
 - [docs/parsing.md](docs/parsing.md): log parser와 extxyz 형식
 - [docs/registry.md](docs/registry.md): SQLite registry 사용법 (DB 입문)
