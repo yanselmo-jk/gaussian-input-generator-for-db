@@ -10,7 +10,7 @@
 4. 조합마다 registry에 id를 등록하고, 새 id일 때만 `.gjf`를 씀.
 5. 마지막에 `manifest.csv`를 다시 씀.
 
-실행 중 경고는 `<out>/warnings.log`에 기록되고, 끝에 종류별 개수만 출력됨. stage마다 같은 cluster를 다시 만들어 같은 경고가 반복되므로, 여러 stage에서 나온 같은 문장은 한 stage에서 가장 많이 나온 횟수만 남김. 그래서 서로 다른 stage에서 따로 생긴 같은 문장의 경고는 덜 세어질 수 있음. 같은 config로 다시 실행하면 이미 있는 구조는 건너뜀. `--only bond_scan reaction`처럼 sampler 일부만 실행해도 cluster 구조는 같게 나옴 (cluster마다 seed가 고정됨).
+실행 중 경고는 `<out>/warnings.log`에 기록되고, 끝에 종류별 개수만 출력됨. stage마다 같은 cluster를 다시 만들어 같은 경고가 반복되므로, 여러 stage에서 나온 같은 문장은 한 stage에서 가장 많이 나온 횟수만 남김. 그래서 서로 다른 stage에서 따로 생긴 같은 문장의 경고는 덜 세어질 수 있음. 같은 config로 다시 실행하면 이미 있는 구조는 건너뜀. `--only bond_scan1 reaction`처럼 sampler 일부만 실행해도 cluster 구조는 같게 나옴 (cluster마다 seed가 고정됨).
 
 xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, constraint/scan 입력, charge, uhf, etemp, xtb binary 경로와 수정 시각)의 sha1임. 다시 실행하면 xtb를 돌리지 않고 같은 구조를 받아 registry에서 기존 id로 걸러짐. 실패한 계산은 저장하지 않음. xtb를 다시 돌리려면 이 폴더를 지움.
 
@@ -52,7 +52,8 @@ xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, c
 | `monomer` | 분자/음이온 최적화 구조, normal-mode 변형, torsion/angle 변형, 단원자 양이온 | `n_normal_mode`, `n_distort`, `T_K` | opt / sp |
 | `pair_scan` | 두 성분의 거리를 바꾼 binding curve | `max_pairs`, `n_orient`, `scales` | sp |
 | `cluster` | M+(solvent)n(anion)m 최적화 구조와 흔든 구조 | `n_distort`, `rattle_A` (기본 0.05 Å, xTB 기준 원자당 약 0.1 eV) | opt / sp |
-| `bond_scan` | bond 하나를 끊어질 때까지 늘인 경로 | `n_points`, `max_bonds_per_cluster`, `bs` | sp |
+| `bond_scan1` | bond 하나를 끊어질 때까지 늘이며 xTB로 relax한 scan | `n_points`, `max_bonds_per_cluster`, `bs` | sp |
+| `bond_scan2` | 같은 bond를 IDPP interpolation으로 늘인 경로. 끝점만 xTB 최적화 | `n_points`, `max_bonds_per_cluster`, `bs` | sp |
 | `reaction` | 첨가 / 치환 / F·H 이동 경로의 pseudo-TS | `templates`, `n_points`, `k_peak`, `max_per_cluster`, `bs` | sp |
 | `hop` | Li+/Na+가 donor 원자 사이를 옮겨 가는 경로 | `n_points`, `max_per_cluster` | sp |
 | `nanoreactor` | 고온 xTB MD snapshot (기본 off) | `T_K`, `ncyc`, `every_n_frames` | sp |
@@ -62,7 +63,7 @@ xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, c
 xTB 구조 하나는 charge와 spin 조합 수만큼 deck(Gaussian 입력 파일)으로 늘어남.
 - **charge**: `charge.delta_q` 값마다 "형식 전하 + Δq"로 하나씩 만듦. 결과가 `charge.range` 밖이면 xTB 계산 전에 건너뜀.
 - **multiplicity**: 최저 multiplicity에 `charge.mult_offsets`를 더한 값들을 씀. 기본은 최저값과 최저값+2임. 전자 수 + 1보다 큰 multiplicity는 뺌.
-- **BS singlet**: `bs: true`인 sampler(`bond_scan`, `reaction`)에서 전자 수가 짝수인 구조의 singlet은 R 대신 U + `guess=mix`(BS singlet)로만 만듦. 같은 구조에 singlet label이 하나만 생기게 하기 위함임. OMol25도 bond가 끊어질 수 있는 singlet을 UKS와 대칭을 깬 초기 guess로 계산함. bond가 끊어지지 않은 구조에서는 UKS 해가 R 해로 돌아옴.
+- **BS singlet**: `bs: true`인 sampler(`bond_scan1`, `bond_scan2`, `reaction`)에서 전자 수가 짝수인 구조의 singlet은 R 대신 U + `guess=mix`(BS singlet)로만 만듦. 같은 구조에 singlet label이 하나만 생기게 하기 위함임. OMol25도 bond가 끊어질 수 있는 singlet을 UKS와 대칭을 깬 초기 guess로 계산함. bond가 끊어지지 않은 구조에서는 UKS 해가 R 해로 돌아옴.
 - **상한**: `max_structures`는 charge와 spin으로 늘리기 전의 구조 수에 대한 상한임.
 
 | sampler | opt deck | sp deck | BS singlet |
@@ -70,7 +71,8 @@ xTB 구조 하나는 charge와 spin 조합 수만큼 deck(Gaussian 입력 파일
 | `monomer` | 분자와 음이온마다 xTB 최적화 구조 1개. Gaussian이 다시 최적화하며, 최적화의 모든 step이 frame이 됨 | normal-mode 변형 `n_normal_mode`개와 torsion/angle 변형 `n_distort`개. Li+/Na+는 원자 1개짜리 sp만 만들고, 2+ 상태는 만들지 않음 | 없음 |
 | `pair_scan` | 없음 | 쌍 × 방향(`n_orient`) × 거리(`scales`)마다 1개 | 없음 |
 | `cluster` | 조합마다 조립 후 xTB로 최적화한 cluster 1개 | 흔든 구조 `n_distort`개 | 없음 |
-| `bond_scan` | 없음 | bond마다 scan frame 최대 `n_points`개. energy가 급변하거나 cluster가 분리된 frame부터 뒤는 버림 | `bs: true`면 singlet을 BS로만 |
+| `bond_scan1` | 없음 | bond마다 scan frame 최대 `n_points`개. energy가 급변하거나 cluster가 분리된 frame부터 뒤는 버림 | `bs: true`면 singlet을 BS로만 |
+| `bond_scan2` | 없음 | bond마다 최대 `n_points` − 1개. 첫 image는 cluster와 같아서 빼고, 원자가 겹친 image도 버림 | `bs: true`면 singlet을 BS로만 |
 | `reaction` | 없음 | 경로마다 시작 frame, 끝 frame, 최고점 ±`k_peak` frame | `bs: true`면 singlet을 BS로만 |
 | `hop` | 없음 | 경로마다 최대 `n_points`개. 양이온이 다른 원자와 겹치는 점은 버림 | 없음 |
 | `nanoreactor` | 없음 | MD trajectory에서 `every_n_frames`마다 snapshot 1개 | 없음 |
@@ -97,11 +99,20 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
   - xTB SCC가 수렴하지 않으면(기체상 radical 음이온, dianion 등) `--etemp 1000`(Fermi smearing)으로 한 번 다시 돌림. 그 결과를 쓴 record의 params에 `xtb_etemp_K: 1000`이 남음. smearing은 xTB 구조 생성에만 쓰이고 DFT label과는 무관함. 이 재시도는 모든 xTB 계산에 적용됨.
   - 다시 돌린 opt에서 성분이 4 Å 넘게 떨어지면 opt 전 접촉 구조를 씀 (기체상에서 결합 구조가 없는 계, 예: EC_ro⁻ + CO₂•⁻).
   - 최적화 후 흩어진 cluster(다른 성분과 4 Å 안에 원자가 하나도 없는 성분이 있음)는 경고와 함께 버림. 예: 양이온 2개짜리 +3 cluster의 쿨롱 폭발.
-- **bond_scan**
+- **bond_scan1**
   - 분자 안의 bond를 대칭 종류별로 하나씩 고름.
   - 0.85 × r0부터 1.05 × (공유결합 반지름 합) + 1.5 Å까지 xTB constrained scan을 함.
-  - 이웃 frame 사이에서 xTB energy가 5 eV 넘게 뛰면 그 지점 이후 frame을 버림 (xTB 전자 상태가 바뀐 것). reaction scan에도 같은 규칙을 씀.
+  - 이웃 frame 사이에서 xTB energy가 5 eV 넘게 뛰면 그 지점 이후 frame을 버림. reaction scan에도 같은 규칙을 씀.
+    - example config 기준 scan 387개 중 2개(0.5%)에서 일어남 (2026-11-05, 우리 계산).
+    - 원인 1: scan 최적화가 멈춰 같은 좌표에 잘못된 energy가 기록됨. 같은 좌표를 새로 계산하면 jump가 없음.
+    - 원인 2: 한 step 안에서 다른 energy 바닥으로 넘어감. 예: ClO4⁻의 Cl–O 절단 중 떨어진 O가 용매의 H를 빼앗음 (−6.45 eV, 새로 계산해도 같음).
   - relaxed scan이라 대상 bond 외의 원자는 각 점에서 xTB로 이완됨. 성분 간 거리가 4 Å를 넘는 첫 frame부터 버림 (예: q=+2 Li⁺–EC•⁺에서 C=O를 늘이면 Li⁺가 밀려남). reaction scan에도 같은 규칙을 씀.
+- **bond_scan2**
+  - bond는 bond_scan1과 같은 규칙으로 고름.
+  - 끝점: bond의 j쪽 조각(고리 bond면 j 원자 하나)을 bond 방향으로 옮겨 i–j 거리를 r1 = 1.05 × (공유결합 반지름 합) + 1.5 Å로 만든 뒤, 그 거리를 고정하고 xTB로 최적화함.
+  - cluster와 끝점 사이를 IDPP interpolation(`ase.mep`)으로 `n_points`개 image로 이음. 중간 image는 energy model 없이 기하로만 정해지므로 xTB scan의 jump나 재배열이 없음. OMol25의 geodesic / Popcornn 경로와 같은 방식임.
+  - 첫 image(cluster 자체)는 cluster opt deck과 같아서 쓰지 않음. 두 원자가 0.7 × (공유결합 반지름 합)보다 가까운 image는 버림. 끝점 최적화에서 성분이 4 Å 넘게 떨어지면 그 bond를 건너뜀.
+  - params: `method: idpp`, `r_A`, `index`, `ring`, `E_xtb_end_eV`.
 - **reaction (pseudo-TS)**
   - template:
     - `add`: 친핵 원자(O/N/F) → 친전자 원자(carbonyl C, P, S, B)

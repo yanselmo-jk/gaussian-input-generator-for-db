@@ -166,6 +166,24 @@ def to_atoms(step, sid, step_idx):
     return out
 
 
+# OMol25 Appendix A.1 quality filters (arXiv 2505.08762). Their "S2 < 0.5 / < 1.1" is read as the deviation
+# <S2> - S(S+1): an absolute bound would drop every triplet. "Metal-containing" is read as transition metal;
+# the def2-TZVPPD file here covers H-Kr, so that means Sc-Zn. Li+/Na+ clusters use the 1.1 bound.
+MAX_FORCE = 50.0      # eV/A, largest per-atom force
+MAX_S2_DEV = 1.1      # allows the full spin unpairing of a broken-symmetry singlet (deviation ~1)
+MAX_S2_DEV_TM = 0.5
+
+
+def reject(at):
+    """'force' or 's2' if the frame fails the OMol25 force / spin-contamination filters, else ''."""
+    if np.linalg.norm(at.get_forces(), axis=1).max() > MAX_FORCE:
+        return "force"
+    d = at.info.get("s2_dev", np.nan)
+    if np.isfinite(d) and d > (MAX_S2_DEV_TM if any(21 <= z <= 30 for z in at.numbers) else MAX_S2_DEV):
+        return "s2"
+    return ""
+
+
 def log_atoms(path):
     """All frames of a log; id = file stem (= registry id)."""
     sid = Path(path).stem

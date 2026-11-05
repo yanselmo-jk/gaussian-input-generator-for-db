@@ -33,7 +33,7 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 | info | `q_sum_ok`, `spin_sum_ok` | Mulliken charge 합 = 전체 전하 (±1e-3), spin 합 = mult − 1 (±0.05) |
 
 - key 이름은 `6_build_charge-aware-mlip`과 같은 규칙을 따름.
-- spin contamination(`s2_dev`)이 큰 frame도 값만 저장하고 걸러내지 않음.
+- `rmd parse`는 OMol25 Appendix A.1 기준으로 frame을 거름. 원자 하나의 force가 50 eV/Å를 넘거나 `s2_dev`가 1.1(Sc–Zn이 있으면 0.5)을 넘으면 extxyz에 쓰지 않고 개수만 출력함. 논문의 S² 기준은 이상값과의 차이로 해석했고(절대값이면 triplet이 모두 빠짐), Li/Na는 metal 기준에 넣지 않음. `--keep-all`이면 거르지 않음. registry status는 필터와 상관없이 log 단위로 정해짐.
 - NBO spin은 NBO 출력의 alpha와 beta natural population 차이로 계산함.
 
 ## 확인 결과 (Hangang G16 c02, job 1212786, 2026-11-04, test_decks/ t1–t3)

@@ -71,3 +71,11 @@ def test_parse_hangang_test_decks():
         assert np.isnan(a.arrays["lowdin_spins"]).all()      # iop(6/80=1) prints no Lowdin spin for open shell
     assert np.isclose(t2.arrays["nbo_spins"][0], 0.926, atol=1e-3)   # extra electron on Li (NPA)
     assert np.isclose(t3.info["s2"], 0.3253) and np.abs(t3.arrays["nbo_spins"]).max() > 0.4  # symmetry broken
+    from rmlipdata.parse import reject
+    from ase.calculators.singlepoint import SinglePointCalculator
+    assert reject(t1[0]) == reject(t2) == reject(t3) == ""       # OMol25 A.1 filters keep the test decks
+    t3.info["s2_dev"] = 1.2
+    assert reject(t3) == "s2"
+    big = t2.copy()
+    big.calc = SinglePointCalculator(big, energy=0.0, forces=np.full((len(big), 3), 30.0))  # |F| = 52 eV/A
+    assert reject(big) == "force"

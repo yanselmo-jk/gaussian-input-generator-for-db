@@ -91,5 +91,5 @@ rmd view runs/example/gjf/hop/ --save hop.xyz          # 창 없이 extxyz 하�
 
 - 열기 전에 deck마다 번호, id, charge, multiplicity, BS 여부(`guess=mix`), 원자 수, 경로를 한 줄씩 출력함.
 - `--save`로 쓴 extxyz의 각 frame에는 `id`, `charge`, `spin`(= multiplicity), `bs`가 들어감.
-- directory는 파일 이름(= id) 순서로 열림. id가 구조의 hash라서 scan 경로(`bond_scan`, `reaction`, `hop`)가 경로 순서대로 나오지 않음.
+- directory는 파일 이름(= id) 순서로 열림. id가 구조의 hash라서 scan 경로(`bond_scan1`, `bond_scan2`, `reaction`, `hop`)가 경로 순서대로 나오지 않음.
 - `--opt`, `--charge`는 분자 이름에만 쓸 수 있음.

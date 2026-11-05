@@ -8,6 +8,7 @@ import zlib
 from itertools import combinations
 
 import numpy as np
+from ase import Atoms
 from ase.data import atomic_masses, atomic_numbers, covalent_radii
 from ase.io import read as ase_read
 from rdkit import Chem
@@ -378,7 +379,26 @@ def _rattle(positions, sigma, rng, min_dist=0.7, tries=100):
     return None
 
 
-def bond_scan(ctx, scfg, delta_q):
+def _bond_candidates(ctx, cl, combo, max_bonds):
+    """One intramolecular bond per symmetry class per non-cation member, at most max_bonds (random subset).
+    Returns [(i, j, member atom indices)] in cluster indices."""
+    seen, cand = set(), []
+    for (name, idxs), (_, mol) in zip(cl["members"], _mols(ctx, combo)):
+        if ctx.cat[name].kind == "cation":
+            continue
+        rank = list(Chem.CanonicalRankAtoms(mol, breakTies=False))
+        for bd in mol.GetBonds():
+            i, j = bd.GetBeginAtomIdx(), bd.GetEndAtomIdx()
+            key = (name, *sorted((rank[i], rank[j])))
+            if key not in seen:
+                seen.add(key)
+                cand.append((idxs[i], idxs[j], mol, idxs))
+    if len(cand) > max_bonds:
+        cand = [cand[i] for i in ctx.rng.permutation(len(cand))[:max_bonds]]
+    return cand
+
+
+def bond_scan1(ctx, scfg, delta_q):
     """Relaxed xtb scans of one intramolecular bond per symmetry class per member species."""
     bs = bool(scfg.get("bs", False))
     npts = int(scfg.get("n_points", 12))
@@ -390,20 +410,7 @@ def bond_scan(ctx, scfg, delta_q):
         if cl is None:
             continue
         symbols, pos = cl["symbols"], cl["positions"]
-        seen, cand = set(), []
-        for (name, idxs), (_, mol) in zip(cl["members"], _mols(ctx, combo)):
-            if ctx.cat[name].kind == "cation":
-                continue
-            rank = list(Chem.CanonicalRankAtoms(mol, breakTies=False))
-            for b in mol.GetBonds():
-                i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
-                key = (name, *sorted((rank[i], rank[j])))
-                if key not in seen:
-                    seen.add(key)
-                    cand.append((idxs[i], idxs[j]))
-        if len(cand) > max_bonds:
-            cand = [cand[i] for i in ctx.rng.permutation(len(cand))[:max_bonds]]
-        for i, j in cand:
+        for i, j, _, _ in _bond_candidates(ctx, cl, combo, max_bonds):
             r0 = float(np.linalg.norm(pos[i] - pos[j]))
             r1 = 1.05 * (_cov(symbols, i) + _cov(symbols, j)) + 1.5
             r = xtb.run_xtb(symbols, pos, q, _uhf(symbols, q), ctx.workdir, mode="sp",
@@ -416,10 +423,76 @@ def bond_scan(ctx, scfg, delta_q):
                 if n >= _limit(scfg):
                     return
                 frame = np.asarray(frame, float)
-                yield _rec(ctx, symbols, frame, q, "bond_scan", combo, "sp", bs,
+                yield _rec(ctx, symbols, frame, q, "bond_scan1", combo, "sp", bs,
                            {"bond": [i, j], "elements": [symbols[i], symbols[j]],
                             "r_A": float(np.linalg.norm(frame[i] - frame[j])), "index": k,
                             "E_xtb_eV": float(energy)} | _etemp(cl, r))
+                n += 1
+
+
+def _side(mol, i, j):
+    """Local atom indices on j's side of bond i-j; just [j] when the bond is in a ring."""
+    side, todo = {j}, [j]
+    while todo:
+        a = todo.pop()
+        for nb in mol.GetAtomWithIdx(a).GetNeighbors():
+            k = nb.GetIdx()
+            if (a, k) != (j, i) and k not in side:
+                side.add(k)
+                todo.append(k)
+    return [j] if i in side else sorted(side)
+
+
+def bond_scan2(ctx, scfg, delta_q):
+    """Unrelaxed bond-breaking paths: IDPP interpolation (ase.mep) from the cluster to one xtb endpoint.
+
+    Endpoint: j's side of the bond (only atom j for a ring bond) is moved along the bond to
+    r1 = 1.05 x (sum of covalent radii) + 1.5 A, then optimised by xtb with that distance constrained. The
+    n_points images between the cluster and the endpoint get no energy model, as in the OMol25 geodesic /
+    Popcornn paths, so they carry no xtb scan artefacts (state switches, rearrangements along the scan)."""
+    from ase.mep import NEB
+    from ase.mep.neb import idpp_interpolate
+    bs = bool(scfg.get("bs", False))
+    npts = int(scfg.get("n_points", 12))
+    max_bonds = int(scfg.get("max_bonds_per_cluster", 10 ** 9))
+    n = 0
+    for combo in _combos(ctx):
+        getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))
+        q, cl = _cluster(ctx, combo, delta_q)
+        if cl is None:
+            continue
+        symbols, pos = cl["symbols"], np.asarray(cl["positions"], float)
+        rcov = np.array([_cov(symbols, k) for k in range(len(symbols))])
+        for i, j, mol, idxs in _bond_candidates(ctx, cl, combo, max_bonds):
+            li, lj = idxs.index(i), idxs.index(j)
+            side = [idxs[k] for k in _side(mol, li, lj)]
+            r0 = float(np.linalg.norm(pos[i] - pos[j]))
+            r1 = 1.05 * (rcov[i] + rcov[j]) + 1.5
+            start = pos.copy()
+            start[side] += (r1 - r0) * (pos[j] - pos[i]) / r0
+            r = xtb.run_xtb(symbols, start, q, _uhf(symbols, q), ctx.workdir, mode="opt",
+                            constraints=[(i, j, r1)], timeout=_timeout(ctx))
+            if not (r.get("ok") and "positions" in r):
+                continue
+            end = np.asarray(r["positions"], float)
+            if build.fragmented(end, [ix for _, ix in cl["members"]]):
+                continue  # endpoint opt pushed whole members apart: not a bond-breaking path
+            images = [Atoms(symbols, positions=pos)] + [Atoms(symbols, positions=pos) for _ in range(npts - 2)] \
+                + [Atoms(symbols, positions=end)]
+            NEB(images, method="improvedtangent").interpolate()
+            idpp_interpolate(images, traj=None, log=None)
+            for k, im in enumerate(images[1:], 1):  # image 0 is the cluster itself (cluster opt deck)
+                if n >= _limit(scfg):
+                    return
+                x = im.get_positions()
+                d = np.linalg.norm(x[:, None] - x[None], axis=2) + np.eye(len(x)) * 1e9
+                if (d < 0.7 * (rcov[:, None] + rcov[None])).any():
+                    continue  # interpolation pushed two atoms together
+                yield _rec(ctx, symbols, x, q, "bond_scan2", combo, "sp", bs,
+                           {"bond": [i, j], "elements": [symbols[i], symbols[j]], "method": "idpp",
+                            "r_A": float(np.linalg.norm(x[i] - x[j])), "index": k,
+                            "ring": bool(mol.GetBondBetweenAtoms(li, lj).IsInRing()),
+                            "E_xtb_end_eV": float(r["E_eV"])} | _etemp(cl, r))
                 n += 1
 
 
@@ -637,5 +710,5 @@ def nanoreactor(ctx, scfg, delta_q):
             n += 1
 
 
-SAMPLERS = {"monomer": monomer, "pair_scan": pair_scan, "cluster": cluster, "bond_scan": bond_scan,
+SAMPLERS = {"monomer": monomer, "pair_scan": pair_scan, "cluster": cluster, "bond_scan1": bond_scan1, "bond_scan2": bond_scan2,
             "reaction": reaction, "hop": hop, "nanoreactor": nanoreactor}

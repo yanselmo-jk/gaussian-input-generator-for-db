@@ -18,7 +18,8 @@ TINY = {
         "monomer": {"on": True, "n_normal_mode": 1, "n_distort": 1, "T_K": 500, "max_structures": 4},
         "pair_scan": {"on": True, "max_pairs": 1, "n_orient": 1, "scales": [0.9, 1.5], "max_structures": 2},
         "cluster": {"on": True, "n_distort": 1, "rattle_A": 0.1},
-        "bond_scan": {"on": True, "n_points": 3, "max_bonds_per_cluster": 1, "bs": True, "max_structures": 3},
+        "bond_scan1": {"on": True, "n_points": 3, "max_bonds_per_cluster": 1, "bs": True, "max_structures": 3},
+        "bond_scan2": {"on": True, "n_points": 4, "max_bonds_per_cluster": 1, "bs": True, "max_structures": 3},
         "reaction": {"on": True, "templates": ["add", "substitute", "transfer"], "n_points": 3, "k_peak": 1,
                      "max_per_cluster": 1, "bs": True},
         "hop": {"on": True, "n_points": 3, "max_per_cluster": 1},
@@ -73,7 +74,7 @@ def test_generate_end_to_end(tmp_path, capsys):
     db = tmp_path / "run" / "registry.sqlite"
     con = registry.connect(db)
     samplers = {r[0] for r in con.execute("SELECT DISTINCT sampler FROM structures")}
-    assert {"monomer", "pair_scan", "cluster", "bond_scan", "reaction", "hop"} <= samplers
+    assert {"monomer", "pair_scan", "cluster", "bond_scan1", "bond_scan2", "reaction", "hop"} <= samplers
     rows = con.execute("SELECT id, gjf_path, sampler, n_atoms, charge, mult, bs, job FROM structures "
                        "WHERE status='generated'").fetchall()
     assert rows and all(r["gjf_path"] and __import__("pathlib").Path(r["gjf_path"]).exists() for r in rows)
@@ -103,6 +104,19 @@ def test_generate_end_to_end(tmp_path, capsys):
     assert ids1 == {r[0] for r in con.execute("SELECT id FROM structures")}
     con.close()
 
+    mono_dir = tmp_path / "run" / "gjf" / "monomer"
+    n_mono = len(list(mono_dir.glob("*.gjf")))
+    assert cli.main(["submit", str(mono_dir), "--registry", str(db)]) == 0
+    with open(tmp_path / "run" / "manifest.csv", newline="") as f:
+        assert not any(r["sampler"] == "monomer" for r in csv.DictReader(f))   # submitted: out of the manifest
+    capsys.readouterr()
+    assert cli.main(["list", "--registry", str(db)]) == 0
+    assert len(capsys.readouterr().out.splitlines()) == n_mono + 1
+    assert cli.main(["generate", str(path)]) == 0           # a rerun does not put them back
+    con = registry.connect(db)
+    assert con.execute("SELECT COUNT(*) FROM structures WHERE status='submitted'").fetchone()[0] == n_mono
+    con.close()
+    assert cli.main(["submit", str(mono_dir), "--registry", str(db), "--undo"]) == 0
     assert cli.main(["resources", "--registry", str(db), "--nproc", "4", "--mem", "8GB",
                      "--sampler", "monomer"]) == 0
     with open(tmp_path / "run" / "manifest.csv", newline="") as f:

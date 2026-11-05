@@ -21,6 +21,7 @@ xtb는 pip로 설치되지 않으므로 conda로 설치함. `pip`, `pytest` 대�
 rmd generate configs/example.yaml --dry     # 1. 생성될 대상 수 확인 (xtb 실행 안 함)
 rmd generate configs/example.yaml           # 2. 구조 생성 → runs/example/gjf/*.gjf
 #                                             3. runs/example/manifest.csv의 .gjf를 클러스터에 제출
+rmd submit runs/example/manifest.csv --registry runs/example/registry.sqlite   #    제출한 deck 표시 (manifest에서 빠짐)
 rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite   # 4. log → extxyz
 rmd status --registry runs/example/registry.sqlite                       # 5. 진행 상황
 ```
@@ -32,7 +33,9 @@ log 파일명은 `.gjf`와 같게 유지해야 함 (`<id>.gjf` → `<id>.log`).
 | 명령 | 하는 일 |
 |---|---|
 | `rmd generate CONFIG [--dry] [--only SAMPLER ...]` | 구조 생성, Gaussian 입력 작성 |
-| `rmd parse PATH... -o OUT.extxyz [--registry DB]` | Gaussian log를 extxyz로 변환 |
+| `rmd parse PATH... -o OUT.extxyz [--registry DB] [--keep-all]` | Gaussian log를 extxyz로 변환. OMol25 기준 force/⟨S²⟩ 필터 적용 |
+| `rmd submit TARGET... --registry DB [--undo]` | 제출한 deck 표시 (generated → submitted). TARGET: id, .gjf, 폴더, manifest .csv |
+| `rmd list --registry DB [--status S] [--sampler ...]` | 상태별 deck 목록 (기본 submitted) |
 | `rmd status --registry DB` | sampler별, 상태별 개수 |
 | `rmd export --registry DB -o FILE.csv` | registry를 CSV로 내보내기 |
 | `rmd resources --registry DB [--nproc N] [--mem 64GB] [--sampler ...]` | 이미 만든 입력의 `%nprocshared`/`%mem` 변경 |

@@ -99,6 +99,10 @@ def generate(cfg, only=None, dry=False):
     cat = species.catalog()
     names = [n for n, sc in cfg["samplers"].items()
              if _enabled(sc) and (not only or n in only)]
+    unknown = [n for n in names if n not in sample.SAMPLERS]
+    if unknown:
+        raise SystemExit(f"unknown sampler(s) {unknown}; known: {list(sample.SAMPLERS)} "
+                         "(bond_scan became bond_scan1 = xtb relaxed scan and bond_scan2 = IDPP interpolation)")
     if dry:
         _dry(cfg, cat, names)
         return
@@ -296,18 +300,23 @@ def resources_cmd(db, nproc=None, mem=None, samplers=None):
     print(f"{n} decks updated")
 
 
-def parse_cmd(paths, out, db=None):
+def parse_cmd(paths, out, db=None, keep_all=False):
     logs = []
     for p in map(Path, paths):
         logs += (sorted(p.glob("*.log")) + sorted(p.glob("*.out"))) if p.is_dir() else [p]
-    frames, failed, missing = [], 0, 0
+    from collections import Counter
+    frames, failed, missing, dropped = [], 0, 0, Counter()
     con = registry.connect(db) if db else None
     for log in logs:
         steps = parse.parse_log(log)
         fr = [a for i, st in enumerate(steps) for a in parse.to_atoms(st, log.stem, i)]
         ok = bool(fr) and bool(steps) and all(s["normal"] for s in steps)
         failed += 0 if ok else 1
-        frames += fr
+        for a in fr:
+            why = "" if keep_all else parse.reject(a)
+            dropped[why] += bool(why)
+            if not why:
+                frames.append(a)
         if con and not registry.set_status(con, log.stem, "parsed" if ok else "failed", log):
             print(f"warning: {log.stem} is not in the registry", file=sys.stderr)
             missing += 1
@@ -319,7 +328,52 @@ def parse_cmd(paths, out, db=None):
         con.commit()
         con.close()
     print(f"{len(logs)} logs, {len(frames)} frames, {failed} failed")
+    if +dropped:
+        print(f"dropped by OMol25 filters: {dropped['force']} with a force > {parse.MAX_FORCE:g} eV/A, "
+              f"{dropped['s2']} with <S2> - S(S+1) above {parse.MAX_S2_DEV:g} ({parse.MAX_S2_DEV_TM:g} with Sc-Zn)")
     return missing
+
+
+def _ids(targets):
+    """ids from registry ids, .gjf files, directories of .gjf decks, or a manifest .csv."""
+    ids = []
+    for t in targets:
+        p = Path(t)
+        if p.is_dir():
+            ids += [g.stem for g in sorted(p.rglob("*.gjf"))]
+        elif p.suffix == ".csv":
+            with open(p, newline="") as f:
+                ids += [r["id"] for r in csv.DictReader(f)]
+        else:
+            ids.append(p.stem if p.suffix == ".gjf" else t)
+    return ids
+
+
+def submit_cmd(db, targets, undo=False):
+    """Mark decks submitted (generated -> submitted) so the manifest no longer lists them; undo reverses it."""
+    old, new = ("submitted", "generated") if undo else ("generated", "submitted")
+    ids = _ids(targets)
+    con = registry.connect(db)
+    n = sum(con.execute("UPDATE structures SET status=? WHERE id=? AND status=?", (new, i, old)).rowcount
+            for i in ids)
+    con.commit()
+    manifest(con, Path(db).parent)
+    con.close()
+    print(f"{n} of {len(ids)} decks {old} -> {new}")
+
+
+def list_cmd(db, status="submitted", samplers=None):
+    con = registry.connect(db)
+    q, args = "SELECT id, sampler, status, gjf_path, log_path FROM structures WHERE status=?", [status]
+    if samplers:
+        q += f" AND sampler IN ({','.join('?' * len(samplers))})"
+        args += samplers
+    rows = con.execute(q + " ORDER BY sampler, id", args).fetchall()
+    con.close()
+    print("id\tsampler\tstatus\tgjf_path\tlog_path")
+    for r in rows:
+        print("\t".join(str(r[k] or "") for k in ("id", "sampler", "status", "gjf_path", "log_path")))
+    print(f"{len(rows)} {status}", file=sys.stderr)
 
 
 def status_cmd(db):
@@ -457,6 +511,7 @@ def main(argv=None):
     q.add_argument("paths", nargs="+")
     q.add_argument("-o", required=True)
     q.add_argument("--registry")
+    q.add_argument("--keep-all", action="store_true", help="skip the OMol25 force / <S2> filters")
     r = sub.add_parser("resources", help="change %%nprocshared / %%mem of not-yet-run decks")
     r.add_argument("--registry", required=True)
     r.add_argument("--nproc", type=int)
@@ -464,6 +519,14 @@ def main(argv=None):
     r.add_argument("--sampler", nargs="+", default=None)
     s = sub.add_parser("status", help="registry counts")
     s.add_argument("--registry", required=True)
+    m = sub.add_parser("submit", help="mark decks submitted so the manifest no longer lists them")
+    m.add_argument("targets", nargs="+", help="ids, .gjf files, directories of .gjf decks, or a manifest .csv")
+    m.add_argument("--registry", required=True)
+    m.add_argument("--undo", action="store_true", help="submitted -> generated (e.g. cancelled jobs)")
+    ls = sub.add_parser("list", help="list decks with one status (default submitted)")
+    ls.add_argument("--registry", required=True)
+    ls.add_argument("--status", default="submitted", choices=("generated", "submitted", "parsed", "failed"))
+    ls.add_argument("--sampler", nargs="+", default=None)
     e = sub.add_parser("export", help="registry rows to CSV")
     e.add_argument("--registry", required=True)
     e.add_argument("-o", required=True)
@@ -486,9 +549,13 @@ def main(argv=None):
     if a.cmd == "generate":
         generate(yaml.safe_load(Path(a.config).read_text()), only=a.only, dry=a.dry)
     elif a.cmd == "parse":
-        parse_cmd(a.paths, a.o, a.registry)
+        parse_cmd(a.paths, a.o, a.registry, a.keep_all)
     elif a.cmd == "status":
         status_cmd(a.registry)
+    elif a.cmd == "submit":
+        submit_cmd(a.registry, a.targets, a.undo)
+    elif a.cmd == "list":
+        list_cmd(a.registry, a.status, a.sampler)
     elif a.cmd == "resources":
         resources_cmd(a.registry, a.nproc, a.mem, a.sampler)
     elif a.cmd == "add-species":
