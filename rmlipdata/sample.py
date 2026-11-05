@@ -147,10 +147,12 @@ def _cluster(ctx, combo, delta_q):
 
 def _fragmented(cl, cutoff=4.0):
     """True if some member has no atom within cutoff A of any other member."""
-    mem = [idx for _, idx in cl["members"]]
-    if len(mem) < 2:
-        return False
-    return any(min(_min_between(cl["positions"], a, b) for b in mem if b is not a) > cutoff for a in mem)
+    return build.fragmented(cl["positions"], [idx for _, idx in cl["members"]], cutoff)
+
+
+def _etemp(*results):
+    """Provenance param when an xTB step behind a record needed the --etemp retry (SCC not converged)."""
+    return {"xtb_etemp_K": xtb.ETEMP_RETRY_K} if any(r and r.get("etemp_K") for r in results) else {}
 
 
 def _combos(ctx):
@@ -253,7 +255,7 @@ def monomer(ctx, scfg, delta_q):
                 if pos is None:
                     break
                 yield _rec(ctx, symbols, pos, q, "monomer", [name], "sp", False,
-                           {"kind": "normal_mode", "T_K": float(scfg.get("T_K", 500)), "index": k})
+                           {"kind": "normal_mode", "T_K": float(scfg.get("T_K", 500)), "index": k} | _etemp(r))
                 n += 1
 
             frames = sample(_with_positions(mol, positions), int(scfg.get("n_distort", 0)), rng=ctx.rng)
@@ -316,12 +318,16 @@ def pair_scan(ctx, scfg, delta_q):
             if d0 < 1e-6:
                 break
             u = (_com(pos, ib) - _com(pos, ia)) / d0
+            r = None
             if _min_between(pos, ia, ib) > 3.0:  # gas-phase xTB opt left a neutral pair apart: bring into contact
                 pos = _shift_to(pos, ia, ib, u, 2.5, d0)
                 r = xtb.run_xtb(cl["symbols"], pos, q, _uhf(cl["symbols"], q), ctx.workdir, mode="opt",
                                 timeout=_timeout(ctx))
-                if r.get("ok") and "positions" in r:
-                    pos = np.asarray(r["positions"], float)
+                new = np.asarray(r["positions"], float) if r.get("ok") and "positions" in r else None
+                if new is not None and not (r.get("etemp_K") and _min_between(new, ia, ib) > 3.0):
+                    pos = new  # a smeared opt that pushed the pair apart again keeps the 2.5 A contact
+                else:
+                    r = None
                 d0 = float(np.linalg.norm(_com(pos, ib) - _com(pos, ia)))
                 u = (_com(pos, ib) - _com(pos, ia)) / d0
             dc = _min_between(pos, ia, ib)  # contact = shortest inter-member distance
@@ -331,7 +337,7 @@ def pair_scan(ctx, scfg, delta_q):
                 moved = _shift_to(pos, ia, ib, u, s * dc, d0)
                 yield _rec(ctx, cl["symbols"], moved, q, "pair_scan", pair, "sp", False,
                            {"pair": list(pair), "orient": orient, "scale": float(s), "contact_A": dc,
-                            "d_min_A": _min_between(moved, ia, ib)})
+                            "d_min_A": _min_between(moved, ia, ib)} | _etemp(cl, r))
                 n += 1
 
 
@@ -345,7 +351,7 @@ def cluster(ctx, scfg, delta_q):
         if cl is None:
             continue
         yield _rec(ctx, cl["symbols"], cl["positions"], q, "cluster", combo, "opt", False,
-                   {"combo": list(combo), "kind": "opt"})
+                   {"combo": list(combo), "kind": "opt"} | _etemp(cl))
         n += 1
         for k in range(int(scfg.get("n_distort", 0))):
             if n >= _limit(scfg):
@@ -354,7 +360,7 @@ def cluster(ctx, scfg, delta_q):
             if pos is None:
                 continue
             yield _rec(ctx, cl["symbols"], pos, q, "cluster", combo, "sp", False,
-                       {"combo": list(combo), "kind": "distort", "index": k})
+                       {"combo": list(combo), "kind": "distort", "index": k} | _etemp(cl))
             n += 1
 
 
@@ -409,7 +415,7 @@ def bond_scan(ctx, scfg, delta_q):
                 yield _rec(ctx, symbols, frame, q, "bond_scan", combo, "sp", bs,
                            {"bond": [i, j], "elements": [symbols[i], symbols[j]],
                             "r_A": float(np.linalg.norm(frame[i] - frame[j])), "index": k,
-                            "E_xtb_eV": float(energy)})
+                            "E_xtb_eV": float(energy)} | _etemp(cl, r))
                 n += 1
 
 
@@ -527,7 +533,7 @@ def reaction(ctx, scfg, delta_q):
                 yield _rec(ctx, cl["symbols"], r["frames"][k], q, "reaction", combo, "sp", bs,
                            {"template": template, "atoms": list(atoms), "ranges": [list(x) for x in ranges],
                             "index": int(k), "peak_index": int(p), "is_peak": bool(k == p),
-                            "E_xtb_eV": float(E[k])})
+                            "E_xtb_eV": float(E[k])} | _etemp(cl, r))
                 n += 1
 
 
@@ -593,7 +599,7 @@ def hop(ctx, scfg, delta_q):
                     yield _rec(ctx, symbols, cur, q, "hop", combo, "sp", False,
                                {"cation": cation, "cation_index": int(m), "from_donor": d1, "to_donor": int(d2), "t": float(t),
                                 "d_from_A": float(np.linalg.norm(cur[m] - cur[d1])),
-                                "d_to_A": float(np.linalg.norm(cur[m] - cur[d2]))})
+                                "d_to_A": float(np.linalg.norm(cur[m] - cur[d2]))} | _etemp(cl, r))
                     n += 1
 
 

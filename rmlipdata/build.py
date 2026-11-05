@@ -171,11 +171,27 @@ def assemble(names, cat, workdir, charge, rng):
     coords = np.vstack(positions)
 
     r = xtb.run_xtb(symbols, coords, int(charge), _uhf(symbols, charge), workdir, mode="opt")
-    if r["ok"] and "positions" in r:
-        coords = np.asarray(r["positions"], float)
-    else:
+    out = {"symbols": symbols, "positions": coords, "members": members, "composition": composition(names)}
+    if not (r["ok"] and "positions" in r):
         warnings.warn(f"assemble {list(names)}: xtb opt failed, keeping pre-opt geometry ({r.get('err', '')[:120]})")
-    return {"symbols": symbols, "positions": coords, "members": members, "composition": composition(names)}
+    elif r.get("etemp_K") and fragmented(r["positions"], [idx for _, idx in members]):
+        # smeared opt converged but the members flew apart (no bound gas-phase minimum, e.g. two anions):
+        # the contact geometry is the useful PES point
+        warnings.warn(f"assemble {list(names)} q={charge}: --etemp opt separated the members; keeping pre-opt geometry")
+    else:
+        out["positions"] = np.asarray(r["positions"], float)
+        if r.get("etemp_K"):
+            out["etemp_K"] = r["etemp_K"]
+    return out
+
+
+def fragmented(positions, members, cutoff=4.0):
+    """True if some member (list of atom-index lists) has no atom within cutoff A of any other member."""
+    if len(members) < 2:
+        return False
+    pos = np.asarray(positions, float)
+    return any(min(float(np.linalg.norm(pos[a][:, None] - pos[b][None], axis=-1).min())
+                   for b in members if b is not a) > cutoff for a in members)
 
 
 def _uhf(symbols, charge):

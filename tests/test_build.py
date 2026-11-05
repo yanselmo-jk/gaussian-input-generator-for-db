@@ -117,3 +117,32 @@ def test_sampler_guards():
     pos = np.array([[0, 0, 0], [0, 0, 5.0]])
     moved = sample._shift_to(pos, [0], [1], np.array([0, 0, 1.0]), 1.5, 5.0)
     assert np.isclose(moved[1, 2], 1.5, atol=1e-6) and (moved[0] == 0).all()
+
+
+def test_xtb_scc_retry(tmp_path, monkeypatch):
+    """SCC non-convergence -> one rerun with --etemp 1000; result carries etemp_K. CO2 + CO2 at q=-1 (from the
+    stress matrix) fails at 300 K; whether it does is CPU-dependent, so the retry path is also forced below."""
+    import subprocess
+    import warnings
+    from rmlipdata import xtb
+    sym = ["O", "C", "O", "O", "C", "O"]
+    pos = [[-1.7135, 0.3328, 1.2102], [-1.1690, -0.6660, 1.3293], [-0.6245, -1.6647, 1.4483],
+           [-1.4815, -0.0896, -1.2429], [-1.5066, 0.4431, -2.2547], [-1.5316, 0.9758, -3.2665]]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = xtb.run_xtb(sym, pos, -1, 1, tmp_path, mode="opt")
+    assert r["ok"] and r.get("etemp_K", 1000) == 1000
+    calls, real = [], subprocess.run
+
+    def fake(args, **kw):
+        calls.append(list(args))
+        if "--etemp" not in args:
+            return subprocess.CompletedProcess(args, 1, "-1- scf: " + xtb.SCC_FAIL + "\n", "")
+        return real(args, **kw)
+    monkeypatch.setattr(xtb.subprocess, "run", fake)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = xtb.run_xtb(sym, pos, -1, 1, tmp_path, mode="sp")
+    assert r["ok"] and r["etemp_K"] == 1000 and len(calls) == 2 and calls[1][-2:] == ["--etemp", "1000"]
+    two = [[0, 1, 2], [3, 4, 5]]
+    assert not build.fragmented(pos, two) and build.fragmented(np.array(pos) + np.array([[0, 0, 0]] * 3 + [[0, 0, -9.0]] * 3), two)

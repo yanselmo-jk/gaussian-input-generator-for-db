@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -167,12 +168,18 @@ def _hessian(path: Path, n: int) -> np.ndarray:
     return vals.reshape(3 * n, 3 * n)
 
 
-def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(), scan=None, fix=(), timeout=1800):
+SCC_FAIL = "Self consistent charge iterator did not converge"
+ETEMP_RETRY_K = 1000
+
+
+def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(), scan=None, fix=(), timeout=1800,
+            etemp=None):
     """One GFN2 gas-phase job in a fresh temp dir under workdir, deleted afterwards. Never raises.
 
     mode: "sp" | "opt" | "hess"; scan = dict(n=int, ranges=[(r0, r1), ...]) implies an optimised scan over
     the constraints in order. Returns {"ok", "E_eV", "positions" (opt), "frames"+"E_eV" (scan),
-    "hessian" (hess), "err"}.
+    "hessian" (hess), "err"}. If the SCC does not converge (gas-phase radical anions, dianions, near-degenerate
+    states), the job is rerun once with Fermi smearing (--etemp 1000 K) and the result carries "etemp_K".
     """
     d = None
     try:
@@ -191,6 +198,8 @@ def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(),
             args.append("--opt")
         if mode == "hess":
             args.append("--hess")
+        if etemp:
+            args += ["--etemp", str(etemp)]
         wait_ram()
         try:
             r = subprocess.run(args, cwd=d, capture_output=True, text=True, timeout=timeout, env=xtb_env())
@@ -198,8 +207,14 @@ def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(),
             return {"ok": False, "err": f"timeout after {timeout} s"}
         e = re.findall(r"TOTAL ENERGY\s+(-?\d+\.\d+) Eh", r.stdout)
         if r.returncode or not e:
+            if etemp is None and SCC_FAIL in r.stdout:
+                warnings.warn(f"xtb SCC did not converge (q={charge}, uhf={uhf}, {mode}); rerun with --etemp {ETEMP_RETRY_K}")
+                return run_xtb(symbols, positions, charge, uhf, workdir, mode, constraints, scan, fix, timeout,
+                               etemp=ETEMP_RETRY_K)
             return {"ok": False, "err": (r.stdout + r.stderr)[-400:]}
         out = {"ok": True, "E_eV": float(e[-1]) * HA_EV}
+        if etemp:
+            out["etemp_K"] = etemp
         if scan:
             if not (d / "xtbscan.log").exists():
                 return {"ok": False, "err": "no xtbscan.log"}
