@@ -5,7 +5,6 @@ Adapted from 9_build_automatic_reaction_search_agent/rxnagent/tools/nano/nano.py
 import hashlib
 import json
 import os
-import pickle
 import re
 import shutil
 import subprocess
@@ -217,10 +216,12 @@ def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(),
     text = (f"{mode}|{charge}|{uhf}|{etemp}|{exe}|{stamp}|{_xyz(symbols, positions)}|"
             f"{_input(list(constraints), scan, list(fix))}|{mdinp}")
     key = hashlib.sha1(text.encode()).hexdigest()
-    path = Path(CACHE) / key[:2] / f"{key}.pkl"
+    path = Path(CACHE) / key[:2] / f"{key}.json"
     if path.exists():
         HITS += 1
-        out = pickle.loads(path.read_bytes())
+        out = json.loads(path.read_text())
+        if "hessian" in out:  # the only ndarray result; callers expect it back as an array
+            out["hessian"] = np.asarray(out["hessian"], float)
         if out.get("etemp_K") and etemp is None:
             warnings.warn(f"xtb SCC did not converge (q={charge}, uhf={uhf}, {mode}); rerun with --etemp {ETEMP_RETRY_K}")
         return out
@@ -228,7 +229,7 @@ def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(),
     if out["ok"]:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{key}.{os.getpid()}.tmp")
-        tmp.write_bytes(pickle.dumps(out))
+        tmp.write_text(json.dumps({k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in out.items()}))
         os.replace(tmp, path)  # atomic: parallel generate stages may write the same key
     return out
 
