@@ -180,3 +180,18 @@ def test_generate_warnings_log(tmp_path, monkeypatch, capsys):
     log = tmp_path / "run" / "warnings.log"
     assert len(log.read_text().splitlines()) >= 2
     assert "2  xtb scan energy jump # eV at point #; later points dropped" in capsys.readouterr().err
+
+
+def test_generate_progress(tmp_path, capsys):
+    cfg = dict(TINY, out=str(tmp_path / "run"))
+    cfg["samplers"] = {name: dict(sc, on=name in ("monomer", "cluster"))
+                       for name, sc in TINY["samplers"].items()}
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    assert cli.main(["generate", str(path)]) == 0
+    err = capsys.readouterr().err
+    assert "stages (delta_q x sampler)" in err
+    assert "[1/" in err
+    assert " done: " in err
+    assert cli.main(["generate", str(path), "--dry"]) == 0
+    assert "monomer: " in capsys.readouterr().out

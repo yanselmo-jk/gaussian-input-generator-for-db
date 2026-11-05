@@ -24,6 +24,9 @@ HA_EV = 27.211386245988
 XTB_MISSING = "xtb not found on PATH: run `conda activate rmlipdata` (or conda install -c conda-forge xtb)"
 
 
+CALLS = 0  # xTB invocations since process start, shown in the generate progress line
+
+
 def find_xtb() -> str:
     """xtb from PATH; raises FileNotFoundError with an install hint otherwise."""
     path = shutil.which("xtb")
@@ -184,6 +187,8 @@ def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(),
     "hessian" (hess), "err"}. If the SCC does not converge (gas-phase radical anions, dianions, near-degenerate
     states), the job is rerun once with Fermi smearing (--etemp 1000 K) and the result carries "etemp_K".
     """
+    global CALLS
+    CALLS += 1
     d = None
     try:
         wd = Path(workdir)

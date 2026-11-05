@@ -6,6 +6,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import warnings
 import zlib
 from pathlib import Path
@@ -40,21 +41,27 @@ def _combos(cfg, cat):
                         np.random.default_rng(int(cfg.get("seed", 0)) + zlib.crc32(b"cluster")))
 
 
-def _dry(cfg, cat, names):
+def _plan(cfg, cat, names):
     combos = _combos(cfg, cat)
     sp = [n for k in ("cations", "anions", "solvents") for n in cfg["species"].get(k, [])]
     npairs = len([(a, b) for i, a in enumerate(sp) for b in sp[i:]
                   if not (cat[a].kind == "cation" and cat[b].kind == "cation")])
+    plan = {}
     for name in names:
         scfg = cfg["samplers"][name]
         if name == "monomer":
-            k = len(sp)
+            plan[name] = len(sp)
         elif name == "pair_scan":
-            k = min(npairs, int(scfg.get("max_pairs", npairs)))
+            plan[name] = min(npairs, int(scfg.get("max_pairs", npairs)))
         elif name == "cluster":
-            k = len([c for c in combos if len(c) >= 2])
+            plan[name] = len([c for c in combos if len(c) >= 2])
         else:
-            k = len(combos)
+            plan[name] = len(combos)
+    return plan
+
+
+def _dry(cfg, cat, names):
+    for name, k in _plan(cfg, cat, names).items():
         print(f"{name}: {k}")
 
 
@@ -69,7 +76,8 @@ def generate(cfg, only=None, dry=False):
         raise SystemExit(xtb.XTB_MISSING)
     out = Path(cfg["out"])
     out.mkdir(parents=True, exist_ok=True)
-    os.environ["RMLIPDATA_XTB_THREADS"] = str(cfg.get("xtb", {}).get("threads", 4))
+    threads = cfg.get("xtb", {}).get("threads", 4)
+    os.environ["RMLIPDATA_XTB_THREADS"] = str(threads)
     con = registry.connect(out / "registry.sqlite")
     ctx = _ctx(cfg, cat, out)
     ctx.combos = _combos(cfg, cat)
@@ -77,12 +85,56 @@ def generate(cfg, only=None, dry=False):
     mem = cfg.get("g16", {}).get("mem", "32GB")
     offsets = tuple(cfg.get("charge", {}).get("mult_offsets", (0, 2)))
     added = {n: 0 for n in names}
+
+    dq_list = cfg.get("charge", {}).get("delta_q", [0])
+    plan = _plan(cfg, cat, names)
+    n_stages = len(dq_list) * len(names)
+    for name in names:
+        print(f"  {name}: {plan[name]} units x {len(dq_list)} delta_q", file=sys.stderr)
+    print(f"{n_stages} stages (delta_q x sampler), xtb threads {threads}", file=sys.stderr)
+
+    tty = sys.stderr.isatty()
+    start = time.time()
+    calls0 = xtb.CALLS
+    st = {"i": 0, "dq": 0, "name": "", "u": 0, "k": 0, "label": "", "new": 0, "last": 0.0, "shown": None}
+
+    def status():
+        s = int(time.time() - start)
+        h, s = divmod(s, 3600)
+        mm, ss = divmod(s, 60)
+        clock = f"{h}:{mm:02d}:{ss:02d}" if h else f"{mm:02d}:{ss:02d}"
+        return (f"[{st['i']}/{n_stages}] dq={float(st['dq']):+g} {st['name']} {st['u']}/{st['k']} {st['label']}"
+                f" | new {st['new']} | xtb {xtb.CALLS - calls0} | {clock}")
+
+    def draw():
+        if tty:
+            now = time.time()
+            if now - st["last"] < 0.5:
+                return
+            st["last"] = now
+            w = max(shutil.get_terminal_size((80, 24)).columns - 1, 1)
+            sys.stderr.write("\r" + status()[:w].ljust(w))
+            sys.stderr.flush()
+        elif st["shown"] != (st["i"], st["u"]):
+            st["shown"] = (st["i"], st["u"])
+            print(status(), file=sys.stderr, flush=True)
+
+    def progress(label):
+        st["u"] += 1
+        st["label"] = label
+        draw()
+
+    ctx.progress = progress
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
-            for dq in cfg.get("charge", {}).get("delta_q", [0]):
+            i = 0
+            for dq in dq_list:
                 for name in names:
+                    i += 1
                     scfg = cfg["samplers"][name]
+                    st.update(i=i, dq=dq, name=name, u=0, k=plan[name], label="", new=0, last=0.0, shown=None)
+                    stage_start = time.time()
                     ctx.rng = np.random.default_rng(int(cfg.get("seed", 0)) + zlib.crc32(name.encode()))
                     for rec in sample.SAMPLERS[name](ctx, scfg, dq):
                         if len(rec["symbols"]) > _max_atoms(cfg):
@@ -98,7 +150,13 @@ def generate(cfg, only=None, dry=False):
                                                          rec["job"], sid, nproc, mem))
                                 registry.set_gjf(con, sid, path)
                                 added[name] += 1
+                                st["new"] += 1
+                        draw()
                     con.commit()
+                    if tty:
+                        sys.stderr.write("\r" + " " * max(shutil.get_terminal_size((80, 24)).columns - 1, 1) + "\r")
+                    print(f"[{i}/{n_stages}] dq={float(dq):+g} {name} done: {st['new']} new decks, "
+                          f"{time.time() - stage_start:.1f} s", file=sys.stderr, flush=True)
             manifest(con, out)
             for name in names:
                 total = con.execute("SELECT COUNT(*) FROM structures WHERE sampler=?", (name,)).fetchone()[0]

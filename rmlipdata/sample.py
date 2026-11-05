@@ -226,6 +226,7 @@ def monomer(ctx, scfg, delta_q):
     n = 0
     for kind in ("cations", "anions", "solvents"):
         for name in ctx.cfg["species"].get(kind, []):
+            getattr(ctx, "progress", lambda *a: None)(name)
             if n >= _limit(scfg):
                 return
             sp = ctx.cat[name]
@@ -305,6 +306,7 @@ def pair_scan(ctx, scfg, delta_q):
         pairs = [pairs[i] for i in ctx.rng.permutation(len(pairs))[:max_pairs]]
     n = 0
     for pair in pairs:
+        getattr(ctx, "progress", lambda *a: None)("+".join(pair))
         for orient in range(int(scfg.get("n_orient", 1))):
             if n >= _limit(scfg):
                 return
@@ -347,6 +349,7 @@ def cluster(ctx, scfg, delta_q):
     for combo in _combos(ctx):
         if len(combo) < 2 or n >= _limit(scfg):
             continue
+        getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))  # plan counts >= 2 members
         q, cl = _cluster(ctx, combo, delta_q)
         if cl is None:
             continue
@@ -382,6 +385,7 @@ def bond_scan(ctx, scfg, delta_q):
     max_bonds = int(scfg.get("max_bonds_per_cluster", 10 ** 9))
     n = 0
     for combo in _combos(ctx):
+        getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))
         q, cl = _cluster(ctx, combo, delta_q)
         if cl is None:
             continue
@@ -505,6 +509,7 @@ def reaction(ctx, scfg, delta_q):
     max_per = int(scfg.get("max_per_cluster", 10 ** 9))
     n = 0
     for combo in _combos(ctx):
+        getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))
         q, cl = _cluster(ctx, combo, delta_q)
         if cl is None:
             continue
@@ -546,6 +551,7 @@ def hop(ctx, scfg, delta_q):
     max_per = int(scfg.get("max_per_cluster", 10 ** 9))
     n = 0
     for combo in _combos(ctx):
+        getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))
         q, cl = _cluster(ctx, combo, delta_q)
         if cl is None:
             continue
@@ -610,6 +616,7 @@ def nanoreactor(ctx, scfg, delta_q):
     every = int(scfg.get("every_n_frames", 50))
     n = 0
     for combo in _combos(ctx):
+        getattr(ctx, "progress", lambda *a: None)(build.composition(list(combo)))
         q = _formal(ctx, combo) + int(delta_q)
         if not _q_ok(ctx, q):
             continue
