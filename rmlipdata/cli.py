@@ -124,14 +124,21 @@ def generate(cfg, only=None, dry=False):
     offsets = tuple(cfg.get("charge", {}).get("mult_offsets", (0, 2)))
     redox = float(cfg.get("charge", {}).get("redox_fraction", 1.0))
     high_spin = float(cfg.get("charge", {}).get("high_spin_fraction", 1.0))
+    vertical = float(cfg.get("charge", {}).get("vertical_fraction", 0.2))
+    dedup = float(cfg.get("limits", {}).get("dedup_A", 0.1))
+    qlo, qhi = cfg.get("charge", {}).get("range", (-2, 2))
     added = {n: 0 for n in names}
+    hsfrac = {n: float(cfg["samplers"][n].get("high_spin_fraction", high_spin)) for n in names}
+    dedup_dropped, seen = Counter(), {}
 
     dq_list = cfg.get("charge", {}).get("delta_q", [0])
     plan = _plan(cfg, cat, names)
     todo = [(i, dq, name) for i, (dq, name) in enumerate(((dq, n) for dq in dq_list for n in names), 1)]
     n_stages = len(todo)
-    extra = "".join(f", {k} {v:g}" for k, v in (("redox_fraction", redox), ("high_spin_fraction", high_spin))
-                    if v < 1.0)
+    extra = "".join(f", {k} {v:g}" for k, v in (("redox_fraction", redox), ("high_spin_fraction", high_spin),
+                                                ("vertical_fraction", vertical)) if v < 1.0)
+    if dedup:
+        extra += f", dedup_A {dedup:g}"
     for name in names:
         print(f"  {name}: {plan[name]} units x {len(dq_list)} delta_q{extra}", file=sys.stderr)
     print(f"{n_stages} stages (delta_q x sampler), {nmax} at a time, xtb threads {threads} each", file=sys.stderr)
@@ -164,29 +171,57 @@ def generate(cfg, only=None, dry=False):
         sys.stderr.write("\r" + status()[:w].ljust(w))
         sys.stderr.flush()
 
-    def add(name, rec, dq):
-        n = 0
+    def add(name, rec, dq, hsfrac):
         x = registry.make_id(rec["sampler"], rec["symbols"], rec["positions"], rec["charge"], 0, False,
                              rec["job"]).encode()
+        if dedup:
+            key = (name, int(dq), rec["composition"], rec["charge"], tuple(rec["symbols"]))
+            pos = np.asarray(rec["positions"], float)
+            idx = range(len(pos))
+            if any(np.linalg.norm(sample._kabsch(pos, ref, idx) - ref, axis=1).max() < dedup
+                   for ref in seen.get(key, ())):
+                dedup_dropped[name] += 1
+                return 0
+            seen.setdefault(key, []).append(pos)
         u = int(hashlib.sha1(x).hexdigest()[:8], 16) / 2 ** 32
         if int(dq) != 0 and u >= redox:
             return 0
-        states = g16.spin_states(rec["symbols"], rec["charge"], offsets=offsets, bs=rec["bs"])
-        low = min((mult for mult, _ in states), default=0)
         u_hs = int(hashlib.sha1(x + b"hs").hexdigest()[:8], 16) / 2 ** 32
-        for mult, bs in states:
-            if mult > low and not bs and u_hs >= high_spin:
-                continue
-            row = dict(rec, mult=mult, bs=bs, formula=Atoms(symbols=rec["symbols"]).get_chemical_formula())
-            sid, is_new = registry.add(con, row)
-            if is_new:
-                path = out / "gjf" / rec["job"] / name / f"{sid}.gjf"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(g16.deck(rec["symbols"], rec["positions"], rec["charge"], mult, bs,
-                                         rec["job"], sid, nproc, mem, pop_always))
-                registry.set_gjf(con, sid, path)
-                added[name] += 1
-                n += 1
+
+        def emit(q, params, parent=None):
+            n, first = 0, None
+            states = g16.spin_states(rec["symbols"], q, offsets=offsets, bs=rec["bs"])
+            low = min((mult for mult, _ in states), default=0)
+            for mult, bs in states:
+                if mult > low and not bs and u_hs >= hsfrac:
+                    continue
+                row = dict(rec, charge=q, mult=mult, bs=bs, params=params, parent_id=parent,
+                           formula=Atoms(symbols=rec["symbols"]).get_chemical_formula())
+                sid, is_new = registry.add(con, row)
+                if first is None:
+                    first = sid
+                if is_new:
+                    path = out / "gjf" / rec["job"] / name / f"{sid}.gjf"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(g16.deck(rec["symbols"], rec["positions"], q, mult, bs,
+                                             rec["job"], sid, nproc, mem, pop_always))
+                    registry.set_gjf(con, sid, path)
+                    added[name] += 1
+                    n += 1
+            return n, first
+
+        q0 = int(rec["charge"])
+        n, base = emit(q0, rec["params"])
+        if rec["job"] != "sp" or vertical <= 0.0:
+            return n
+        u_v = int(hashlib.sha1(x + b"vert").hexdigest()[:8], 16) / 2 ** 32
+        if u_v >= vertical:
+            return n
+        symbols = rec["symbols"]
+        if q0 - 1 >= qlo and any(s in ("Li", "Na") for s in symbols):
+            n += emit(q0 - 1, dict(rec["params"], vertical_dq=-1), base)[0]
+        if q0 + 1 <= qhi and any(s not in ("Li", "Na") for s in symbols):
+            n += emit(q0 + 1, dict(rec["params"], vertical_dq=1), base)[0]
         return n
 
     mp = multiprocessing.get_context("fork")  # children inherit catalog, config and monkeypatched samplers
@@ -218,7 +253,7 @@ def generate(cfg, only=None, dry=False):
                     s["label"], s["calls"], s["hits"] = rest
                     draw(force=True)
                 elif kind == "rec":
-                    n = add(s["name"], rest[0], s["dq"])
+                    n = add(s["name"], rest[0], s["dq"], hsfrac[s["name"]])
                     s["new"] += n
                     st["new"] += n
                     draw()
@@ -239,7 +274,8 @@ def generate(cfg, only=None, dry=False):
             manifest(con, out)
             for name in names:
                 total = con.execute("SELECT COUNT(*) FROM structures WHERE sampler=?", (name,)).fetchone()[0]
-                print(f"{name}: {added[name]} new, {total} total")
+                more = f", {dedup_dropped[name]} near-duplicates dropped" if dedup_dropped[name] else ""
+                print(f"{name}: {added[name]} new, {total} total{more}")
         finally:
             for p in running.values():
                 p.terminate()

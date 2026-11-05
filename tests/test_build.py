@@ -208,7 +208,8 @@ def test_fraction_controls(tmp_path, monkeypatch):
         yield dict(symbols=syms, positions=base, charge=int(dq), sampler="fake", composition="H2O1",
                    job="sp", bs=False, params={})
         if int(dq) == 0:  # same formal charge, broken-symmetry record: its singlet deck must survive
-            yield dict(symbols=syms, positions=base + [0.05, 0.0, 0.0], charge=0, sampler="fake",
+            yield dict(symbols=syms, positions=base + [[0.3, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                       charge=0, sampler="fake",
                        composition="H2O1", job="sp", bs=True, params={})
 
     monkeypatch.setitem(sample.SAMPLERS, "fake", fake)
@@ -460,3 +461,190 @@ def test_components_flag_detached_atom():
     comps = sample._components(sym, pos)
     assert sorted(map(sorted, comps)) == [[0], [1, 2, 3], [4]]
     assert build.fragmented(pos, comps) and not build.fragmented(pos[:4], sample._components(sym[:4], pos[:4]))
+
+
+def _fake_cfg(tmp_path, **charge):
+    return dict(TINY, out=str(tmp_path / "run"), samplers={"fake": {"on": True}},
+                charge=dict(TINY["charge"], **charge))
+
+
+def test_vertical_charge_pairs(tmp_path, monkeypatch, capsys):
+    """vertical_fraction 1: a Li sp record adds q-1 and q+1 decks with the base deck as parent_id; a record
+    without Li/Na gets no q-1 deck and an opt record gets no vertical decks."""
+    from ase.io import read
+    from rmlipdata import sample
+    li = np.array([[0.0, 0.0, 0.0], [1.9, 0.0, 0.0], [2.5, 0.7, 0.0], [2.5, -0.7, 0.0]])
+    h2o = np.array([[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]])
+
+    def fake(ctx, scfg, dq):
+        yield dict(symbols=["Li", "O", "H", "H"], positions=li, charge=0, sampler="fake",
+                   composition="Li1 H2O1", job="sp", bs=False, params={"kind": "sp"})
+        yield dict(symbols=["O", "H", "H"], positions=h2o, charge=0, sampler="fake",
+                   composition="H2O1", job="sp", bs=False, params={})
+        yield dict(symbols=["Li", "O", "H", "H"], positions=li + [0.0, 0.0, 1.0], charge=0, sampler="fake",
+                   composition="Li1 H2O1", job="opt", bs=False, params={})
+
+    monkeypatch.setitem(sample.SAMPLERS, "fake", fake)
+    cfg = dict(_fake_cfg(tmp_path, vertical_fraction=1.0, high_spin_fraction=0.0),
+               limits=dict(TINY["limits"], dedup_A=0.0))
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    assert cli.main(["generate", str(path)]) == 0
+
+    con = registry.connect(tmp_path / "run" / "registry.sqlite")
+    rows = con.execute("SELECT id, parent_id, charge, mult, job, params, composition, gjf_path FROM structures"
+                       ).fetchall()
+    con.close()
+    sp_li = [r for r in rows if r["job"] == "sp" and r["composition"] == "Li1 H2O1"]
+    assert {r["charge"] for r in sp_li} == {-1, 0, 1}
+    vert = [(r, json.loads(r["params"])["vertical_dq"]) for r in rows
+            if json.loads(r["params"]).get("vertical_dq")]
+    assert sorted(v for _, v in vert) == [-1, 1, 1]          # Li: +-1; H2O: +1 only
+    base = {r["composition"]: r for r in rows if r["job"] == "sp" and r["charge"] == 0}
+    assert all(r["parent_id"] == base[r["composition"]]["id"] for r, _ in vert)
+    assert all("Li" in r["composition"] or "Na" in r["composition"] for r, v in vert if v == -1)
+    assert not [(r, v) for r, v in vert if r["composition"] == "H2O1" and v == -1]   # no cation
+    assert not [(r, v) for r, v in vert if r["job"] == "opt"]                # vertical pairs only for sp
+    x = read(base["Li1 H2O1"]["gjf_path"], format="gaussian-in").get_positions()
+    assert all(np.allclose(read(r["gjf_path"], format="gaussian-in").get_positions(), x)
+               for r, _ in vert if r["composition"] == "Li1 H2O1")
+
+
+def test_dedup_near_duplicates(tmp_path, monkeypatch, capsys):
+    """A rotated copy is the same geometry and is dropped; a 0.3 A displacement is a different point."""
+    from rmlipdata import sample
+    base = np.array([[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]])
+    rot = base @ np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    moved = base.copy()
+    moved[1, 0] += 0.3
+
+    def fake(ctx, scfg, dq):
+        for pos in (base, rot, moved):
+            yield dict(symbols=["O", "H", "H"], positions=pos, charge=0, sampler="fake", composition="H2O1",
+                       job="sp", bs=False, params={})
+
+    monkeypatch.setitem(sample.SAMPLERS, "fake", fake)
+    cfg = dict(_fake_cfg(tmp_path, vertical_fraction=0.0, high_spin_fraction=0.0),
+               limits=dict(TINY["limits"], dedup_A=0.1))
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    assert cli.main(["generate", str(path)]) == 0
+    assert "1 near-duplicates dropped" in capsys.readouterr().out
+
+    con = registry.connect(tmp_path / "run" / "registry.sqlite")
+    n = con.execute("SELECT COUNT(*) FROM structures").fetchone()[0]
+    con.close()
+    assert n == 2
+
+
+def test_per_sampler_high_spin_fraction(tmp_path, monkeypatch):
+    """samplers.<name>.high_spin_fraction overrides the global value for that sampler only."""
+    from rmlipdata import sample
+    pos = np.array([[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]])
+
+    def make(name):
+        def gen(ctx, scfg, dq):
+            yield dict(symbols=["O", "H", "H"], positions=pos, charge=0, sampler=name, composition="H2O1",
+                       job="sp", bs=False, params={})
+        return gen
+
+    monkeypatch.setitem(sample.SAMPLERS, "fakelo", make("fakelo"))
+    monkeypatch.setitem(sample.SAMPLERS, "fakehi", make("fakehi"))
+    cfg = dict(TINY, out=str(tmp_path / "run"),
+               charge=dict(TINY["charge"], vertical_fraction=0.0, high_spin_fraction=1.0),
+               limits=dict(TINY["limits"], dedup_A=0.0),
+               samplers={"fakelo": {"on": True, "high_spin_fraction": 0.0}, "fakehi": {"on": True}})
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    assert cli.main(["generate", str(path)]) == 0
+
+    con = registry.connect(tmp_path / "run" / "registry.sqlite")
+    got = {name: sorted(r[0] for r in con.execute("SELECT mult FROM structures WHERE sampler=?", (name,)))
+           for name in ("fakelo", "fakehi")}
+    con.close()
+    assert got == {"fakelo": [1], "fakehi": [1, 3]}
+
+
+def test_q_ok_unbound_electron():
+    """A reduction needs Li/Na or a neutral radical; otherwise the extra electron is unbound (silent skip)."""
+    import types
+    from rmlipdata import sample
+    cat = species.catalog()
+    ctx = types.SimpleNamespace(cat=cat, cfg={"charge": {"range": [-2, 2]}})
+
+    def ok(names):
+        return sample._q_ok(ctx, sample._formal(ctx, names) - 1, names, -1)
+
+    assert not ok(["EC"])
+    assert ok(["Li", "EC"])
+    assert ok(["CH3O"])
+    assert not ok(["PF6"])
+    assert ok(["LiF"])
+
+
+def test_too_close_absolute_floor():
+    from rmlipdata import sample
+    assert sample._too_close(["H", "H"], np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.5]]), 0.7)
+    assert not sample._too_close(["H", "H"], np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.7]]), 0.7)
+
+
+def test_reaction_hop_skip_cluster_minimum(tmp_path):
+    """The relaxed cluster is already the cluster opt deck: no reaction index 0, no hop t=0, no exchange k=0."""
+    cfg = dict(TINY, out=str(tmp_path / "run"))
+    cfg["samplers"] = {name: dict(sc, on=name in ("reaction", "hop")) for name, sc in TINY["samplers"].items()}
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    assert cli.main(["generate", str(path)]) == 0
+    con = registry.connect(tmp_path / "run" / "registry.sqlite")
+    rows = con.execute("SELECT sampler, params FROM structures WHERE sampler IN ('reaction', 'hop')").fetchall()
+    con.close()
+    assert {s for s, _ in rows} == {"reaction", "hop"}
+    for sampler, raw in rows:
+        p = json.loads(raw)
+        if sampler == "reaction":
+            assert p["index"] != 0
+        elif p["kind"] == "hop":
+            assert p["t"] > 0
+        else:
+            assert p["index"] != 0
+
+
+def test_md_compositions_dict_and_max_atoms():
+    from rmlipdata import sample
+    cat = species.catalog()
+    cfg = {"species": {"cations": ["Li", "Na"], "anions": [], "solvents": ["EC"]},
+           "limits": {"max_atoms": 60}}
+    scfg = {"n_solvent": {"Li": [2, 3], "Na": [4, 5]}, "with_anion": False}
+    out = sample.md_compositions(cfg, cat, scfg)
+    assert len([n for n in out if n[0] == "Li"]) == 2
+    assert len([n for n in out if n[0] == "Na"]) == 2
+    limited = sample.md_compositions(cfg, cat, dict(scfg, max_atoms=25))
+    assert 0 < len(limited) < len(out)
+    assert all(sum(build.n_atoms(cat[x]) for x in n) <= 25 for n in limited)
+
+
+def test_monomer_rng_per_species(tmp_path, monkeypatch):
+    """A failed hess on the first species must not shift the next species' normal-mode/distortion draws."""
+    from types import SimpleNamespace
+    from rmlipdata import sample
+    cfg = {"seed": 0, "charge": {"range": [-2, 2]},
+           "species": {"cations": [], "anions": [], "solvents": ["EC", "H2O"]}}
+    real = sample.xtb.run_xtb
+
+    def fake(*a, mode="sp", **kw):
+        if mode == "hess" and "C" in a[0]:
+            return {"ok": False, "err": "forced hess failure"}
+        return real(*a, mode=mode, **kw)
+
+    monkeypatch.setattr(sample.xtb, "run_xtb", fake)
+    scfg = {"n_normal_mode": 1, "n_distort": 2, "T_K": 500}
+
+    def run(names):
+        c = dict(cfg, species=dict(cfg["species"], solvents=names))
+        ctx = SimpleNamespace(cfg=c, cat=species.catalog(), workdir=tmp_path, rng=np.random.default_rng(0))
+        return [r for r in sample.monomer(ctx, scfg, 0) if r["composition"] == build.composition(["H2O"])]
+
+    both, alone = run(["EC", "H2O"]), run(["H2O"])
+    assert both and len(both) == len(alone)
+    for a, b in zip(both, alone):
+        assert np.allclose(a["positions"], b["positions"])
