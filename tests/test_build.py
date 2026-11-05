@@ -648,3 +648,66 @@ def test_monomer_rng_per_species(tmp_path, monkeypatch):
     assert both and len(both) == len(alone)
     for a, b in zip(both, alone):
         assert np.allclose(a["positions"], b["positions"])
+
+
+def test_per_combo_rng_isolated(tmp_path, monkeypatch):
+    """A failed xtb opt on the first combo must not shift a later combo's rattle draws."""
+    from types import SimpleNamespace
+    from rmlipdata import sample
+    cat = species.catalog()
+    combo1, combo2 = ("Li", "PF6"), ("Li", "EC")
+
+    def cl_for(combo, bound):
+        if not bound:  # a Coulomb-exploded cluster: _cluster drops it
+            return {"symbols": ["Li", "F"], "positions": np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 40.0]]),
+                    "members": [("Li", [0]), ("F", [1])]}
+        if combo == combo1:
+            pos = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.9], [0.0, 1.2, 2.3]])
+            return {"symbols": ["Li", "P", "F"], "positions": pos,
+                    "members": [("Li", [0]), ("PF6", [1, 2])]}
+        pos = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.5], [0.0, 1.3, 1.1]])
+        return {"symbols": ["Li", "C", "O"], "positions": pos,
+                "members": [("Li", [0]), ("EC", [1, 2])]}
+
+    def fake_assemble(combo, cat_, workdir, q, rng):
+        rng.normal(size=1)  # stand-in for build.assemble's own draws
+        if combo != combo1:
+            return cl_for(combo, True)
+        r = sample.xtb.run_xtb(["Li", "F"], np.zeros((2, 3)), q, 0, workdir, mode="opt")
+        return cl_for(combo, bool(r.get("ok")))
+
+    monkeypatch.setattr(sample, "_combos", lambda ctx: [combo1, combo2])
+    monkeypatch.setattr(build, "assemble", fake_assemble)
+    real = sample.xtb.run_xtb
+
+    def probe(ok):
+        def fake(*a, mode="sp", **kw):
+            if mode == "opt" and a[0] == ["Li", "F"]:
+                return {"ok": ok, "err": "" if ok else "forced opt failure"}
+            return real(*a, mode=mode, **kw)
+        return fake
+
+    cfg = {"seed": 0, "charge": {"range": [-2, 2]}}
+    scfg = {"n_distort": 2, "rattle_A": 0.1, "dilate": []}
+
+    def run(ok):
+        with monkeypatch.context() as m:
+            m.setattr(sample.xtb, "run_xtb", probe(ok))
+            ctx = SimpleNamespace(cfg=cfg, cat=cat, workdir=tmp_path, clusters={},
+                                  rng=np.random.default_rng(0))
+            return [r for r in sample.cluster(ctx, scfg, 0)
+                    if r["composition"] == build.composition(list(combo2))]
+
+    both, alone = run(False), run(True)
+    assert len(both) == len(alone) == 3  # opt + 2 rattles for the second combo
+    for a, b in zip(both, alone):
+        assert np.allclose(a["positions"], b["positions"])
+
+
+def test_q_ok_li_dianion():
+    """Li + 2 PF6 at q=-2 is Li0 plus two PF6-: an unbound gas-phase dianion."""
+    import types
+    from rmlipdata import sample
+    ctx = types.SimpleNamespace(cat=species.catalog(), cfg={"charge": {"range": [-2, 2]}})
+    assert not sample._q_ok(ctx, -2, ["Li", "PF6", "PF6"], -1)
+    assert sample._q_ok(ctx, -1, ["Li", "PF6"], -1)
