@@ -62,19 +62,54 @@ def combos(cat, cfg_species, cfg_cluster, max_atoms, rng):
     cations = list(cfg_species.get("cations", []))
     comps = list(cfg_species.get("anions", [])) + list(cfg_species.get("solvents", []))
     min_c = int(cfg_cluster.get("min_components", 1))
-    max_c = int(cfg_cluster.get("max_components", 3))
+    mc = cfg_cluster.get("max_components", 3)
     max_cat = int(cfg_cluster.get("max_cations", 2))
-    max_combos = int(cfg_cluster.get("max_combos", 10 ** 9))
-    out = []
+    groups = []
     for nc in range(max_cat + 1):
+        max_c = int(mc.get(nc, 3)) if isinstance(mc, dict) else int(mc)
+        group = []
         for cats in combinations_with_replacement(cations, nc):
             for ncomp in range(min_c, max_c + 1):
                 for cs in combinations_with_replacement(comps, ncomp):
+                    if nc >= 2 and not any(cat[n].kind == "anion" for n in cs):
+                        continue  # a multi-cation cluster without an anion is not a bound state
                     names = tuple(cats) + tuple(cs)
                     if sum(n_atoms(cat[n]) for n in names) <= max_atoms:
-                        out.append(names)
-    order = rng.permutation(len(out))
-    return [out[i] for i in order[:max_combos]]
+                        group.append(names)
+        groups.append(group)
+    if "max_combos" not in cfg_cluster:
+        return [names for group in groups for names in group]
+
+    k = int(cfg_cluster["max_combos"])
+    weights = list(cfg_cluster.get("cation_weights", [0.2, 0.7, 0.1]))
+    w = [float(weights[nc]) if nc < len(weights) else 0.0 for nc in range(len(groups))]
+    total = sum(w)
+    if total <= 0.0:  # no usable weights: split evenly
+        w = [1.0] * len(groups)
+        total = float(len(groups)) or 1.0
+    take = [min(int(round(k * wi / total)), len(group)) for wi, group in zip(w, groups)]
+    short = k - sum(take)  # a small group's missing share goes to the others in weight order
+    order = sorted(range(len(groups)), key=lambda i: -w[i])
+    if short > 0:
+        for i in order:
+            if short <= 0:
+                break
+            if w[i] <= 0.0:  # a zero-weight group only gets what its own weight gives it
+                continue
+            add = min(short, len(groups[i]) - take[i])
+            take[i] += add
+            short -= add
+    elif short < 0:  # rounding overshot: trim the lowest-weight groups first
+        for i in reversed(order):
+            if short >= 0:
+                break
+            cut = min(-short, take[i])
+            take[i] -= cut
+            short += cut
+    out = []
+    for group, n in zip(groups, take):
+        out.extend(group[i] for i in rng.permutation(len(group))[:n])
+    return out
 
 
 def _place(pos, center, used, placed, distance, donors, rng):
