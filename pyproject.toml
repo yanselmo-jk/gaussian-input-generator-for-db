@@ -7,7 +7,7 @@ name = "rmlipdata"
 version = "0.1.4"
 description = "Reactive electrolyte cluster dataset generator (xTB paths -> Gaussian16 decks) and Gaussian16 log parser"
 requires-python = ">=3.10"
-dependencies = ["numpy", "ase", "rdkit", "pyyaml"]
+dependencies = ["numpy", "ase", "rdkit", "pyyaml", "pytest"]
 
 [project.scripts]
 rmd = "rmlipdata.cli:main"

@@ -21,12 +21,15 @@ DUMP_FS = 10.0
 ETEMP = (2000, 5000, 10000)      # electronic temperature ladder for SCC-failed segment retries
 RHO = 1.2                        # g/cm3 liquid density for the packing sphere
 HA_EV = 27.211386245988
-FALLBACK_XTB = "/home/yanselmo/miniconda3/envs/rmlipdata/bin/xtb"
+XTB_MISSING = "xtb not found on PATH: run `conda activate rmlipdata` (or conda install -c conda-forge xtb)"
 
 
 def find_xtb() -> str:
-    """xtb from PATH, else the rmlipdata environment's binary."""
-    return shutil.which("xtb") or FALLBACK_XTB
+    """xtb from PATH; raises FileNotFoundError with an install hint otherwise."""
+    path = shutil.which("xtb")
+    if path is None:
+        raise FileNotFoundError(XTB_MISSING)
+    return path
 
 
 # from 9_build_automatic_reaction_search_agent/rxnagent/tools/nano/nano.py

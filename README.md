@@ -7,11 +7,13 @@ GFN2-xTB로 구조와 반응 경로를 만들고, 각 구조를 Gaussian16 입�
 ## 설치
 
 ```bash
-conda create -n rmlipdata -c conda-forge python=3.11 "xtb>=6.7" ase rdkit numpy pyyaml pytest
+conda create -n rmlipdata -c conda-forge python=3.11 "xtb>=6.7"
 conda activate rmlipdata
-pip install -e .
-pytest -q tests
+python -m pip install -e .      # numpy, ase, rdkit, pyyaml, pytest가 함께 설치됨
+python -m pytest -q tests
 ```
+
+xtb는 pip로 설치되지 않으므로 conda로 설치함. `pip`, `pytest` 대신 `python -m pip`, `python -m pytest`를 쓰면 다른 환경(base 등)의 pip/pytest가 실행되는 일을 막을 수 있음.
 
 ## 사용법
 

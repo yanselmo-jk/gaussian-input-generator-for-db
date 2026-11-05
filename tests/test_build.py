@@ -131,7 +131,7 @@ def test_xtb_scc_retry(tmp_path, monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = xtb.run_xtb(sym, pos, -1, 1, tmp_path, mode="opt")
-    assert r["ok"] and r.get("etemp_K", 1000) == 1000
+    assert r["ok"] and r.get("etemp_K", 1000) == 1000, r.get("err")
     calls, real = [], subprocess.run
 
     def fake(args, **kw):
@@ -159,3 +159,24 @@ def test_view_gjf(tmp_path):
     assert len(atoms) == 3
     assert (atoms.info["charge"], atoms.info["spin"], atoms.info["id"]) == (0, 1, "run1-000001")
     assert cli.main(["view", "EC", "--save", str(tmp_path / "ec.xyz")]) == 0
+
+
+def test_generate_warnings_log(tmp_path, monkeypatch, capsys):
+    import warnings
+    from rmlipdata import sample
+    cfg = dict(TINY, out=str(tmp_path / "run"))
+    cfg["samplers"] = {name: dict(sc, on=name == "monomer") for name, sc in TINY["samplers"].items()}
+    real = sample.SAMPLERS["monomer"]
+
+    def noisy(ctx, scfg, dq):
+        warnings.warn("xtb scan energy jump -6.6 eV at point 10; later points dropped")
+        warnings.warn("xtb scan energy jump +5.1 eV at point 3; later points dropped")
+        yield from real(ctx, scfg, dq)
+
+    monkeypatch.setitem(sample.SAMPLERS, "monomer", noisy)
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    assert cli.main(["generate", str(path)]) == 0
+    log = tmp_path / "run" / "warnings.log"
+    assert len(log.read_text().splitlines()) >= 2
+    assert "2  xtb scan energy jump # eV at point #; later points dropped" in capsys.readouterr().err

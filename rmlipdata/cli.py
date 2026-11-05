@@ -3,8 +3,10 @@ import argparse
 import csv
 import os
 import re
+import shutil
 import sys
 import tempfile
+import warnings
 import zlib
 from pathlib import Path
 
@@ -63,6 +65,8 @@ def generate(cfg, only=None, dry=False):
     if dry:
         _dry(cfg, cat, names)
         return
+    if shutil.which("xtb") is None:  # without xtb every structure would silently stay at its start geometry
+        raise SystemExit(xtb.XTB_MISSING)
     out = Path(cfg["out"])
     out.mkdir(parents=True, exist_ok=True)
     os.environ["RMLIPDATA_XTB_THREADS"] = str(cfg.get("xtb", {}).get("threads", 4))
@@ -73,30 +77,53 @@ def generate(cfg, only=None, dry=False):
     mem = cfg.get("g16", {}).get("mem", "32GB")
     offsets = tuple(cfg.get("charge", {}).get("mult_offsets", (0, 2)))
     added = {n: 0 for n in names}
-    for dq in cfg.get("charge", {}).get("delta_q", [0]):
-        for name in names:
-            scfg = cfg["samplers"][name]
-            ctx.rng = np.random.default_rng(int(cfg.get("seed", 0)) + zlib.crc32(name.encode()))
-            for rec in sample.SAMPLERS[name](ctx, scfg, dq):
-                if len(rec["symbols"]) > _max_atoms(cfg):
-                    continue
-                for mult, bs in g16.spin_states(rec["symbols"], rec["charge"], offsets=offsets, bs=rec["bs"]):
-                    row = dict(rec, mult=mult, bs=bs,
-                               formula=Atoms(symbols=rec["symbols"]).get_chemical_formula())
-                    sid, is_new = registry.add(con, row)
-                    if is_new:
-                        path = out / "gjf" / name / f"{sid}.gjf"
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_text(g16.deck(rec["symbols"], rec["positions"], rec["charge"], mult, bs,
-                                                 rec["job"], sid, nproc, mem))
-                        registry.set_gjf(con, sid, path)
-                        added[name] += 1
-            con.commit()
-    manifest(con, out)
-    for name in names:
-        total = con.execute("SELECT COUNT(*) FROM structures WHERE sampler=?", (name,)).fetchone()[0]
-        print(f"{name}: {added[name]} new, {total} total")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            for dq in cfg.get("charge", {}).get("delta_q", [0]):
+                for name in names:
+                    scfg = cfg["samplers"][name]
+                    ctx.rng = np.random.default_rng(int(cfg.get("seed", 0)) + zlib.crc32(name.encode()))
+                    for rec in sample.SAMPLERS[name](ctx, scfg, dq):
+                        if len(rec["symbols"]) > _max_atoms(cfg):
+                            continue
+                        for mult, bs in g16.spin_states(rec["symbols"], rec["charge"], offsets=offsets, bs=rec["bs"]):
+                            row = dict(rec, mult=mult, bs=bs,
+                                       formula=Atoms(symbols=rec["symbols"]).get_chemical_formula())
+                            sid, is_new = registry.add(con, row)
+                            if is_new:
+                                path = out / "gjf" / name / f"{sid}.gjf"
+                                path.parent.mkdir(parents=True, exist_ok=True)
+                                path.write_text(g16.deck(rec["symbols"], rec["positions"], rec["charge"], mult, bs,
+                                                         rec["job"], sid, nproc, mem))
+                                registry.set_gjf(con, sid, path)
+                                added[name] += 1
+                    con.commit()
+            manifest(con, out)
+            for name in names:
+                total = con.execute("SELECT COUNT(*) FROM structures WHERE sampler=?", (name,)).fetchone()[0]
+                print(f"{name}: {added[name]} new, {total} total")
+        finally:
+            _log_warnings(out, caught)
     con.close()
+
+
+def _log_warnings(out, caught):
+    """warnings.log holds one warning per line; stderr gets a short summary grouped by kind."""
+    from collections import Counter
+    msgs = [re.sub(r"[ \t]+", " ", re.sub(r"\s*\n\s*", " | ", str(w.message))).strip() for w in caught]
+    log = Path(out) / "warnings.log"
+    log.write_text("".join(m + "\n" for m in msgs))
+    if not caught:
+        return
+
+    def kind(m):
+        k = re.sub(r"\[[^]]*\]", "[..]", m.split("(", 1)[0])
+        return re.sub(r"[+-]?\d+(?:\.\d+)?", "#", k).strip()[:90]
+
+    print(f"{len(caught)} warnings, details in {log}", file=sys.stderr)
+    for k, n in Counter(map(kind, msgs)).most_common():
+        print(f"  {n}  {k}", file=sys.stderr)
 
 
 LINK0 = {"nproc": re.compile(r"^%nprocshared=(.*)$", re.M), "mem": re.compile(r"^%mem=(.*)$", re.M)}
@@ -306,7 +333,7 @@ def main(argv=None):
     q.add_argument("paths", nargs="+")
     q.add_argument("-o", required=True)
     q.add_argument("--registry")
-    r = sub.add_parser("resources", help="change %nprocshared / %mem of not-yet-run decks")
+    r = sub.add_parser("resources", help="change %%nprocshared / %%mem of not-yet-run decks")
     r.add_argument("--registry", required=True)
     r.add_argument("--nproc", type=int)
     r.add_argument("--mem", help="e.g. 64GB")

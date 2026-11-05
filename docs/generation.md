@@ -8,7 +8,7 @@
 4. 조합마다 registry에 id를 등록하고, 새 id일 때만 `.gjf`를 씀.
 5. 마지막에 `manifest.csv`를 다시 씀.
 
-같은 config로 다시 실행하면 이미 있는 구조는 건너뜀. `--only bond_scan reaction`처럼 sampler 일부만 실행해도 cluster 구조는 같게 나옴 (cluster마다 seed가 고정됨).
+실행 중 경고는 `<out>/warnings.log`에 모두 기록되고, 끝에 종류별 개수만 출력됨. 같은 config로 다시 실행하면 이미 있는 구조는 건너뜀. `--only bond_scan reaction`처럼 sampler 일부만 실행해도 cluster 구조는 같게 나옴 (cluster마다 seed가 고정됨).
 
 ## 산출물 (`out` 폴더)
 
