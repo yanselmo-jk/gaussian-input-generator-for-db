@@ -180,7 +180,7 @@ def parse_step(text):
 
 
 def parse_log(path):
-    text = Path(path).read_text(errors="replace")
+    text = Path(path).read_text(errors="replace").replace("\r\n", "\n")  # CRLF after a Windows text copy
     return [parse_step(c) for c in STEP_SPLIT.split(text) if ROUTE.search(c)]
 
 
@@ -321,9 +321,11 @@ def flag_paths(frames):
 
 
 def log_id(path, steps):
-    """Registry id: the deck title (rmd writes the id there), so any file or directory name works; else the stem."""
+    """Registry id: the deck title (rmd writes the id there), so any file or directory name works; else the file
+    stem or the directory name (<id>/in.log of a run that died before echoing the title); else the stem."""
+    p = Path(path)
     t = steps[0]["title"] if steps else ""
-    return t if ID_RE.fullmatch(t) else Path(path).stem
+    return next((c for c in (t, p.stem, p.parent.name) if ID_RE.fullmatch(c)), p.stem)
 
 
 def log_atoms(path):

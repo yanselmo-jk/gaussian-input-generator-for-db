@@ -810,3 +810,13 @@ def test_atoms_ignore_mult_offsets(tmp_path):
     rows = dict(((c, q), m) for c, q, m in sqlite3.connect(tmp_path / "run" / "registry.sqlite").execute(
         "SELECT composition, charge, mult FROM structures"))
     assert rows[("C", 0)] == 3 and rows[("O", 0)] == 3 and rows[("O", 1)] == 4 and len(rows) == 8
+
+
+def test_multi_radical_bs():
+    """Pairs/clusters with two radical members get BS singlets; one radical or none stays RKS."""
+    from types import SimpleNamespace
+    from rmlipdata.sample import _multi_radical
+    from rmlipdata import species
+    ctx = SimpleNamespace(cat=species.catalog())
+    assert _multi_radical(ctx, ["CH3O", "CH3O"]) and _multi_radical(ctx, ["Li", "EC_ro", "CH3O"])
+    assert not _multi_radical(ctx, ["CH3O", "EC"]) and not _multi_radical(ctx, ["Li", "EC", "PF6"])

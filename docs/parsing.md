@@ -5,12 +5,15 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 ```
 
 - PATH에는 log 파일이나 폴더를 줌. 폴더면 하위 폴더까지 `*.log`, `*.out`을 모두 읽음.
-- id는 log에 다시 적힌 deck title에서 읽음 (`rmd generate`가 title에 registry id를 씀). 그래서 파일·폴더 이름은 자유로움 (예: `<id>/in.log`). title이 id 형식(`<sampler>-<12자리 hex>`)이 아니면 파일 이름에서 확장자를 뺀 부분을 씀.
+- id는 log에 다시 적힌 deck title에서 읽음 (`rmd generate`가 title에 registry id를 씀). 그래서 파일·폴더 이름은 자유로움 (예: `<id>/in.log`). title이 id 형식(`<sampler>-<12자리 hex>`)이 아니면 파일 이름에서 확장자를 뺀 부분을 씀. title을 읽기 전에 죽은 job은 폴더 이름이 id면 그것을 씀.
+- 같은 id의 log가 여럿이면 정상 종료한 것 하나만 쓰고(없으면 마지막 것) 경고함.
+- `Entering Gaussian System`이 없는 파일(예: `slurm-*.out`)은 무시하고 개수만 출력함.
 - `--registry`를 주면 각 log의 status를 바꿈.
   - 모든 job step이 정상 종료되고 frame이 있으면 `parsed`.
   - `Error termination`이 있으면 `failed` (frame은 씀).
   - 둘 다 없으면 (계산 중, walltime 초과로 끊김) frame을 쓰지 않고 status를 바꾸지 않음. 개수만 출력함. 끊긴 job은 `rmd list`(status `submitted`)로 찾아 다시 계산함.
 - 순서: extxyz를 임시 파일에 다 쓰고 교체한 다음 registry 변경을 확정함. 그래서 저장에 실패하면 registry가 바뀌지 않음.
+- `--registry` 파일이 없으면 멈춤 (경로 오타로 빈 DB가 생기지 않게). parse는 extxyz를 쓴 뒤 status를 한 번에 기록함. 다른 `rmd` 명령이 registry를 쓰는 중이면 최대 10분 기다림.
 
 ## Frame을 나누는 규칙
 
@@ -52,7 +55,7 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 
 ## 경로 연속성 표시 (`path_flag`)
 
-`--registry`를 주면 같은 경로의 sp frame을 경로 순서대로 비교해 `path_flag`를 붙임. 같은 경로는 sampler, 조성, charge, multiplicity, BS, 경로 key가 같은 frame임. 경로 key는 bond_scan의 bond, reaction의 template과 원자 쌍, hop의 양이온과 donor임. frame은 버리지 않음.
+`--registry`를 주면 같은 경로의 sp frame을 경로 순서대로 비교해 `path_flag`를 붙임. 같은 경로는 sampler, 조성, charge, multiplicity, BS, 경로 key, 생성 설정 hash(`cfg_tag`: seed, species, cluster, sampler 설정)가 같은 frame임. 경로 key는 bond_scan의 bond, reaction의 template과 원자 쌍, hop의 양이온과 donor임. frame은 버리지 않음.
 
 - `ok`: 이상 없음.
 - `energy`: 이웃 frame(흔든 frame 포함) 사이 원자 최대 이동이 0.5 Å 미만인데, 에너지 변화가 force로 예상한 값 −½(F_a + F_b)·(R_b − R_a)와 2 eV 넘게 다름. SCF가 다른 해에 수렴했을 가능성이 있음.
@@ -80,6 +83,6 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 ## 다른 machine에서 계산할 때
 
 1. 생성 machine: `rmd generate`, 필요하면 `rmd resources`, 그다음 `rmd submit manifest.csv`.
-2. deck을 원하는 구조로 복사함 (예: `<id>/in.gjf`). deck 안의 title이 id라 이름을 바꿔도 됨.
+2. deck을 원하는 구조로 복사함 (예: `<id>/in.gjf`). deck 안의 title이 id라 이름을 바꿔도 됨. `rmd submit`에 `<id>/in.gjf`를 줘도 title에서 id를 읽음.
 3. 계산 machine: 폴더마다 `g16 in.gjf`.
 4. 결과 폴더를 생성 machine으로 가져와 `rmd parse back/ -o data.extxyz --registry runs/x/registry.sqlite`. 계산 중인 job이 섞여 있어도 됨. 다시 parse하면 끝난 job이 추가됨 (extxyz는 매번 새로 씀).

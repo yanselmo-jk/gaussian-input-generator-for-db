@@ -13,7 +13,7 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS structures (
 
 
 def connect(path):
-    con = sqlite3.connect(path)
+    con = sqlite3.connect(path, timeout=600)  # wait for a concurrent rmd generate / parse instead of failing
     con.row_factory = sqlite3.Row
     con.execute(SCHEMA)
     return con

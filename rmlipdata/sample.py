@@ -117,6 +117,14 @@ def _cation_only(ctx, names):
     return all(ctx.cat[n].kind == "cation" for n in names)
 
 
+def _multi_radical(ctx, names):
+    """Two or more radical members (catalog radicals: EC_ro, MeOCO2, CH3, CH3O): the even-electron singlet is written
+    as a UKS guess=mix (BS) singlet. RKS pairs the two electrons, which for separated radicals gives a state several
+    eV above the open-shell singlet that the same fragments get elsewhere (bond_scan BS)."""
+    return sum(any(a.GetNumRadicalElectrons() for a in m.GetAtoms())
+               for m in (Chem.MolFromSmiles(ctx.cat[n].smiles or "") for n in names) if m is not None) >= 2
+
+
 def _rec(ctx, symbols, positions, charge, sampler, names, job, bs, params):
     return dict(symbols=[str(s) for s in symbols], positions=np.asarray(positions, float), charge=int(charge),
                 sampler=sampler, composition=build.composition(list(names)), job=job, bs=bool(bs),
@@ -487,7 +495,7 @@ def pair_scan(ctx, scfg, delta_q):
                 if n >= _limit(scfg):
                     return
                 moved = _shift_to(pos, ia, ib, u, s * dc, d0)
-                yield _rec(ctx, cl["symbols"], moved, q, "pair_scan", pair, "sp", False,
+                yield _rec(ctx, cl["symbols"], moved, q, "pair_scan", pair, "sp", _multi_radical(ctx, pair),
                            {"pair": list(pair), "orient": orient, "scale": float(s), "contact_A": dc,
                             "d_min_A": _min_between(moved, ia, ib)} | extra | _etemp(cl, r))
                 n += 1
@@ -504,7 +512,7 @@ def cluster(ctx, scfg, delta_q):
         if cl is None:
             continue
         rng = _stream(ctx, "cluster", combo, q)
-        yield _rec(ctx, cl["symbols"], cl["positions"], q, "cluster", combo, "opt", False,
+        yield _rec(ctx, cl["symbols"], cl["positions"], q, "cluster", combo, "opt", _multi_radical(ctx, combo),
                    {"combo": list(combo), "kind": "opt"} | _etemp(cl))
         n += 1
         if n >= _limit(scfg):
@@ -519,7 +527,7 @@ def cluster(ctx, scfg, delta_q):
                 pos = _rattle(cl["positions"], float(sigma), rng)
                 if pos is None:
                     continue
-                yield _rec(ctx, cl["symbols"], pos, q, "cluster", combo, "sp", False,
+                yield _rec(ctx, cl["symbols"], pos, q, "cluster", combo, "sp", _multi_radical(ctx, combo),
                            {"combo": list(combo), "kind": "distort", "index": k,
                             "sigma_A": float(sigma)} | _etemp(cl))
                 n += 1
@@ -539,7 +547,7 @@ def cluster(ctx, scfg, delta_q):
                 moved[idxs] += (float(f) - 1.0) * (_com(cl["positions"], idxs) - com)
             if _too_close(cl["symbols"], moved, 0.7, other):
                 continue  # rigid dilation pushed two members into each other
-            yield _rec(ctx, cl["symbols"], moved, q, "cluster", combo, "sp", False,
+            yield _rec(ctx, cl["symbols"], moved, q, "cluster", combo, "sp", _multi_radical(ctx, combo),
                        {"combo": list(combo), "kind": "dilate", "factor": float(f)} | _etemp(cl))
             n += 1
         cats = [(name, idxs) for name, idxs in cl["members"] if ctx.cat[name].kind == "cation"]
@@ -561,7 +569,7 @@ def cluster(ctx, scfg, delta_q):
                 moved[idxs] += (float(f) - 1.0) * _min_between(cl["positions"], cats[0][1], idxs) * u / d
             if _too_close(cl["symbols"], moved, 0.7):
                 continue
-            yield _rec(ctx, cl["symbols"], moved, q, "cluster", combo, "sp", False,
+            yield _rec(ctx, cl["symbols"], moved, q, "cluster", combo, "sp", _multi_radical(ctx, combo),
                        {"combo": list(combo), "kind": "m_stretch", "factor": float(f)} | _etemp(cl))
             n += 1
 
@@ -1390,7 +1398,7 @@ def cluster_md(ctx, scfg, delta_q):
                     return
                 n += 1
                 rmsd = None if j == 0 else min(_rmsd(cand[p], cand[h]) for h in picked[:j])
-                yield _rec(ctx, symbols, cand[p], q, "cluster_md", names, "sp", False,
+                yield _rec(ctx, symbols, cand[p], q, "cluster_md", names, "sp", _multi_radical(ctx, names),
                            {"T_K": float(T), "frame": int(idx[p]), "rmsd_min_A": rmsd, "names": list(names)}
                            | _etemp(r))
 

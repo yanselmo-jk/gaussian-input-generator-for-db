@@ -170,3 +170,19 @@ def test_parse_dir_layout_id_from_title(tmp_path):
     st = dict(con.execute("SELECT id, status FROM structures"))
     assert st == {sid: "parsed", "monomer-ffffffffffff": "submitted", "monomer-eeeeeeeeeeee": "failed"}
     assert read(tmp_path / "d.extxyz", ":")[0].info["id"] == sid
+    # duplicate copies (a failed one sorting last), CRLF, a run that died before the title, a slurm file
+    (tmp_path / "back" / "z_dup").mkdir()
+    (tmp_path / "back" / "z_dup" / "in.log").write_text(cut + " Error termination via Lnk1e\n")
+    (tmp_path / "back" / sid / "in.log").write_text(done.replace("\n", "\r\n"))
+    (tmp_path / "back" / "monomer-ffffffffffff" / "in.log").write_text(" Entering Gaussian System\n Error termination\n")
+    (tmp_path / "back" / "slurm-1.out").write_text("job started\n")
+    cli.parse_cmd([str(tmp_path / "back")], str(tmp_path / "d.extxyz"), db=str(tmp_path / "registry.sqlite"))
+    st = dict(con.execute("SELECT id, status FROM structures"))
+    assert st == {sid: "parsed", "monomer-ffffffffffff": "failed", "monomer-eeeeeeeeeeee": "failed"}
+    assert len(read(tmp_path / "d.extxyz", ":")) == 2                 # sid once (normal copy) + eeee once
+    import pytest
+    with pytest.raises(SystemExit):
+        cli.main(["status", "--registry", str(tmp_path / "typo.sqlite")])
+    assert not (tmp_path / "typo.sqlite").exists()
+    (tmp_path / "back" / sid / "in.gjf").write_text(f"%mem=1GB\n#p sp\n\n{sid}\n\n0 2\n")
+    assert cli._ids([str(tmp_path / "back" / sid / "in.gjf")]) == [sid]

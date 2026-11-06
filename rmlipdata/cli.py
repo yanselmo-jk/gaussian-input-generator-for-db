@@ -397,15 +397,27 @@ def parse_cmd(paths, out, db=None, keep_all=False):
         logs += (sorted(p.rglob("*.log")) + sorted(p.rglob("*.out"))) if p.is_dir() else [p]
     logs = list(dict.fromkeys(logs))
     from collections import Counter
-    frames, failed, missing, incomplete, dropped = [], 0, 0, 0, Counter()
+    frames, failed, missing, incomplete, other, dropped, updates = [], 0, 0, 0, 0, Counter(), []
     con = registry.connect(db) if db else None
+    runs = {}
     for log in logs:
         steps = parse.parse_log(log)
         normal = bool(steps) and all(s["normal"] for s in steps)
-        if not normal and not any(s["error"] for s in steps):
+        err = any(s["error"] for s in steps)
+        if not steps:  # nothing past the route echo: died early (bad %mem, ...), or not a Gaussian log (slurm-*.out)
+            text = Path(log).read_text(errors="replace")
+            err = "Error termination" in text
+            if not err and "Entering Gaussian System" not in text:
+                other += 1
+                continue
+        if not normal and not err:
             incomplete += 1  # still running or killed: no frames, registry status unchanged
             continue
-        sid = parse.log_id(log, steps)  # deck title = registry id, whatever the file is called
+        runs.setdefault(parse.log_id(log, steps), []).append((log, steps, normal))  # id from the deck title
+    for sid, cands in runs.items():
+        log, steps, normal = next((c for c in cands if c[2]), cands[-1])  # a normal-terminated copy wins
+        if len(cands) > 1:
+            print(f"warning: {sid}: {len(cands)} logs, using {log}", file=sys.stderr)
         fr = [a for i, st in enumerate(steps) for a in parse.to_atoms(st, sid, i)]
         row = con.execute("SELECT sampler, composition, params FROM structures WHERE id=?", (sid,)).fetchone() \
             if con else None
@@ -423,9 +435,7 @@ def parse_cmd(paths, out, db=None, keep_all=False):
         ok = normal and bool(fr)
         failed += 0 if ok else 1
         frames += fr
-        if con and not registry.set_status(con, sid, "parsed" if ok else "failed", log):
-            print(f"warning: {sid} is not in the registry", file=sys.stderr)
-            missing += 1
+        updates.append((sid, "parsed" if ok else "failed", log))
     n_bad = parse.flag_paths(frames)  # before filtering: neighbours are the generated path, not the survivors
     kept = []
     for a in frames:
@@ -438,11 +448,16 @@ def parse_cmd(paths, out, db=None, keep_all=False):
         tmp = Path(f"{out}.tmp")
         ase_write(tmp, frames, format="extxyz")
         os.replace(tmp, out)
-    if con:
+    if con:  # one short write transaction after the extxyz: generate on the same registry is blocked only briefly
+        for sid, status, log in updates:
+            if not registry.set_status(con, sid, status, log):
+                print(f"warning: {sid} is not in the registry", file=sys.stderr)
+                missing += 1
         con.commit()
         con.close()
     print(f"{len(logs)} logs, {len(frames)} frames, {failed} failed"
-          + (f", {incomplete} without a termination line skipped (running or killed)" if incomplete else ""))
+          + (f", {incomplete} without a termination line skipped (running or killed)" if incomplete else "")
+          + (f", {other} non-Gaussian files ignored" if other else ""))
     if n_bad:
         print(f"path check: {n_bad} neighbour pairs marked (info path_flag): energy change differs from the force "
               f"work by > {parse.PATH_JUMP_EV:g} eV (unrattled, step < {parse.PATH_MAX_STEP_A:g} A), or an NPA "
@@ -460,13 +475,22 @@ def _ids(targets):
     for t in targets:
         p = Path(t)
         if p.is_dir():
-            ids += [g.stem for g in sorted(p.rglob("*.gjf"))]
+            ids += [_gjf_id(g) for g in sorted(p.rglob("*.gjf"))]
         elif p.suffix == ".csv":
             with open(p, newline="") as f:
                 ids += [r["id"] for r in csv.DictReader(f)]
         else:
-            ids.append(p.stem if p.suffix == ".gjf" else t)
+            ids.append(_gjf_id(p) if p.suffix == ".gjf" else t)
     return ids
+
+
+def _gjf_id(path):
+    """Registry id of a deck: its stem, else its title line (a copy renamed to <id>/in.gjf)."""
+    p = Path(path)
+    if parse.ID_RE.fullmatch(p.stem):
+        return p.stem
+    return next((l.strip() for l in p.read_text(errors="replace").splitlines() if parse.ID_RE.fullmatch(l.strip())),
+                p.stem)
 
 
 def submit_cmd(db, targets, undo=False):
@@ -672,6 +696,8 @@ def main(argv=None):
     v.add_argument("--charge", type=int)
     v.add_argument("--save")
     a = p.parse_args(argv)
+    if a.cmd != "generate" and getattr(a, "registry", None) and not Path(a.registry).is_file():
+        raise SystemExit(f"{a.registry}: no such registry")  # sqlite would silently create an empty one
     if a.cmd == "generate":
         generate(yaml.safe_load(Path(a.config).read_text()), only=a.only, dry=a.dry)
     elif a.cmd == "parse":

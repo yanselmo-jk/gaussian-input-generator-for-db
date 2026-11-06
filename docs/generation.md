@@ -63,7 +63,7 @@ xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, c
 | sampler | 만드는 구조 | 주요 설정 | job |
 |---|---|---|---|
 | `monomer` | 분자/음이온 최적화 구조, normal-mode 변형, torsion/angle 변형, 단원자 양이온 | `n_normal_mode`, `n_distort`, `T_K` | opt / sp |
-| `atoms` | 단원자 기준 deck: 설정한 종의 모든 원소, charge −1/0/+1 (H⁺ 제외). delta_q 0 stage에서만, vertical deck 없음 | multiplicity는 Hund 바닥 상태 하나만 씀 (예: C 3중항, N 4중항, O⁺ 4중항, P⁻ 3중항). `high_spin_fraction`은 쓰지 않음 | sp |
+| `atoms` | 단원자 기준 deck: 설정한 종의 모든 원소, charge −1/0/+1 (H⁺ 제외). delta_q 0 stage에서만, vertical deck 없음 | multiplicity는 `charge.mult_offsets`와 무관하게 Hund 바닥 상태 하나 (예: C 3중항, N 4중항, O⁺ 4중항, P⁻ 3중항). Aufbau 순서의 마지막 열린 subshell 기준. d·f 껍질이 열린 원소는 경고 후 건너뜀. `high_spin_fraction`은 쓰지 않음 | sp |
 | `pair_scan` | 두 성분의 거리를 바꾼 binding curve. 양이온 쌍(Li–Li, Li–Na, Na–Na) 포함 | `max_pairs`, `n_orient`, `scales` | sp |
 | `cluster` | M+(solvent)n(anion)m 최적화 구조, 흔든 구조, 늘이거나 줄인 구조 | `n_distort`, `rattle_A` (숫자나 목록, 기본 0.05 Å, xTB 기준 원자당 약 0.1 eV), `dilate`, `m_stretch` | opt / sp |
 | `cluster_md` | 양이온 1개 + 용매 n개(+ 음이온)의 xTB MD frame을 RMSD로 골라 씀 | `n_solvent`, `with_anion`, `T_K`, `time_ps`, `equil_ps`, `dump_fs`, `n_frames`, `max_clusters`, `max_atoms` | sp |
@@ -178,6 +178,7 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
   - params: `template`, `atoms`, `pairs`, `index`, `endpoint`, `E_xtb_end_eV`.
 - **hop**
   - 양이온 위치를 출발점에서 도착 donor 원자 앞까지 선형으로 옮김.
+  - `path_rattle_A`로 흔드는 점은 경로 점 번호로 정함 (짝수 번째). 중간 점의 xTB 실패가 뒤 점을 바꾸지 않음.
   - 도착 donor는 출발 donor와 다른 원자만 고름 (양이온이 가장 가까운 donor에서 2.6 Å보다 멀면 그 donor가 후보 범위에 들어오기 때문).
   - 각 점에서 양이온–출발 donor, 양이온–도착 donor, 두 donor 사이 거리를 constraint로 묶고 나머지를 xTB로 최적화함. xtb `$fix`는 이 cluster들에서 원자를 정확히 고정하지 못함 (고정한 원자가 최대 2 Å 움직임).
   - 기준 원자 r3(경로 중점 6 Å 이내 heavy atom 중 donor 축에서 가장 먼 원자, 축에서 0.5 Å 이상)와 양이온·두 donor 사이 거리도 고정함 (총 6개). 3개만 쓰면 양이온이 donor 축을 중심으로 돌 수 있었음: c4 config에서 경로 이탈 최대 2.94 → 0.52 Å (2026-11-05, 우리 계산).
@@ -194,6 +195,7 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
 - xTB 경로는 charge마다 따로 계산함 (uhf = 전자 수 % 2). 같은 경로를 여러 multiplicity로 계산함.
 - 환원(Δq < 0)은 전체 전하가 −1 이상이면서 Li/Na가 있거나 중성 radical(예: CH3O)이 있는 계에만 만듦. 양이온 없는 용매·음이온의 추가 전자나 dianion은 기체상에서 결합하지 않아 diffuse basis 꼬리에 갇힌 가짜 상태가 됨 (Li + 2 PF6의 q = −2도 Li⁰ + 2 PF6⁻라 제외). GFN2-xTB는 이를 판별하지 못함: H2O⁻ vertical detachment energy +3.8 eV, DME⁻ +5.7 eV (2026-11-05, 우리 계산).
 - Δq ≤ −2는 Li/Na를 가진 성분 수가 |Δq| 이상인 계에만 만듦 (전자 하나당 Li/Na 하나).
+- pair_scan, cluster, cluster_md에서 라디칼 성분(EC_ro, MeOCO2, CH3, CH3O 등 catalog 라디칼)이 둘 이상이면 짝수 전자 singlet을 BS(UKS `guess=mix`)로 씀. RKS는 떨어진 두 라디칼의 전자를 한 궤도에 넣어 open-shell singlet보다 수 eV 높은 해를 주고, 같은 조각의 bond_scan BS singlet과 label이 어긋남.
 - 원자 겹침 판정은 f × (공유결합 반지름 합)과 0.6 Å 중 큰 값을 씀 (H–H는 0.7배가 0.43 Å라 하한을 둠).
 
 ## Gaussian 입력
