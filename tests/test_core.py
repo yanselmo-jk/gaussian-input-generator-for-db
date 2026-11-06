@@ -141,9 +141,9 @@ def test_flag_paths_energy_and_spin(tmp_path):
     frames[5].arrays["nbo_spins"] = np.array([0.1, 0.9])   # unpaired electron jumped
     assert flag_paths(frames) == 3
     assert [a.info["path_flag"] for a in frames] == ["ok", "ok", "energy", "energy", "energy,spin", "spin"]
-    frames[3].info["rattled"] = True                       # rattled frames: energy compared across them
-    assert flag_paths(frames) == 1                         # exact neighbours 2 and 4 are consistent
-    assert [a.info["path_flag"] for a in frames] == ["ok", "ok", "ok", "ok", "spin", "spin"]
+    frames[3].info["rattled"] = True                       # rattled frames are checked like the others
+    assert flag_paths(frames) == 3
+    assert [a.info["path_flag"] for a in frames] == ["ok", "ok", "energy", "energy", "energy,spin", "spin"]
     write(tmp_path / "p.extxyz", frames, format="extxyz")
     assert read(tmp_path / "p.extxyz", ":")[0].info["path_flag"] == "ok"
     assert path_key("hop", {"kind": "hop", "t": 0.5, "cation_index": 0, "from_donor": 1, "to_donor": 2})[1] == 0.5

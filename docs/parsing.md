@@ -52,9 +52,10 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 `--registry`를 주면 같은 경로의 sp frame을 경로 순서대로 비교해 `path_flag`를 붙임. 같은 경로는 sampler, 조성, charge, multiplicity, BS, 경로 key가 같은 frame임. 경로 key는 bond_scan의 bond, reaction의 template과 원자 쌍, hop의 양이온과 donor임. frame은 버리지 않음.
 
 - `ok`: 이상 없음.
-- `energy`: 흔들지 않은 frame만 경로 순서로 이어(흔든 frame은 건너뜀) 이웃 사이 원자 최대 이동이 0.5 Å 미만인데, 에너지 변화가 force로 예상한 값 −½(F_a + F_b)·(R_b − R_a)와 2 eV 넘게 다름. SCF가 다른 해에 수렴했을 가능성이 있음.
+- `energy`: 이웃 frame(흔든 frame 포함) 사이 원자 최대 이동이 0.5 Å 미만인데, 에너지 변화가 force로 예상한 값 −½(F_a + F_b)·(R_b − R_a)와 2 eV 넘게 다름. SCF가 다른 해에 수렴했을 가능성이 있음.
 - `spin`: 원자 하나의 NPA spin이 이웃 frame 사이에서 0.5 e 넘게 바뀜. 홀전자가 옮겨 감. 실제 반응(H 이동, 결합 절단)에서도 생길 수 있음.
-- 기준값은 우리 선택임. c4 test config의 xTB 경로로 시험한 결과(2026-11-06, 우리 계산)를 근거로 정함. 이동이 크거나 흔든 frame이 낀 구간은 예상값 오차가 커서(중앙값 0.4–2.6 eV) 에너지 검사에서 뺌.
+- 기준값은 우리 선택임. 근거: c4 test config의 xTB 경로(v0.1.13, 2026-11-06, 우리 계산)에서 |ΔE − 예상값|은 이동 0.5 Å 미만일 때 중앙값 0.13 eV, 최대 2.11 eV(724쌍 중 1쌍이 2 eV 초과), 0.5–1 Å일 때 최대 2.47 eV(145쌍 중 4쌍). 이동이 0.5 Å 이상인 구간은 에너지 검사에서 뺌.
+- (정정) v0.1.12–0.1.13 문서의 "중앙값 0.4–2.6 eV"는 calibration script가 xTB 에너지를 잘못 읽어 force work만 잰 값이었음.
 - 단원자, vertical deck, 최고점 rattle 복사본은 경로에 넣지 않음.
 - 표시는 필터 전에 함. 걸러질 frame도 이웃 비교에 들어가고 표시 결과는 남은 frame에만 기록됨. 같은 경로의 log를 여러 번의 `rmd parse`로 나누면 비교가 끊기므로 한 run은 한 번에 parse함.
 

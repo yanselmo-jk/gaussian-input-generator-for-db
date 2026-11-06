@@ -253,10 +253,10 @@ def reject(at):
 # quadratic PES; rigid translation / rotation do no work). A mismatch means the SCF landed on a different solution
 # (or the PES is not smooth on that segment); a jump of an NPA atomic spin means the unpaired electron moved.
 # Both frames of a bad segment are marked, nothing is dropped. Thresholds are our choice, not literature values.
-# The trapezoid estimate is only good for short segments: on xTB paths of the c4 test config (2026-11-06, our
-# calculation) exact neighbours differ by 0.42 eV median (max 9.2 eV) because atoms move 0.6 A median between
-# frames, and rattled frames by 2.6 eV median. So the energy check uses only unrattled neighbours whose largest
-# atomic displacement is below 0.5 A (xTB max residual there 1.66 eV) and flags only gross jumps above 2 eV.
+# The trapezoid estimate is only good for short segments. On xTB paths of the c4 test config (v0.1.13, 2026-11-06,
+# our calculation; rattled frames included) |dE - dE_pred| is 0.13 eV median, 2.11 eV max (1 of 724 pairs > 2 eV)
+# when the largest atomic displacement is below 0.5 A, and 2.47 eV max (4 of 145 > 2 eV) for 0.5-1 A. So the energy
+# check uses neighbours below 0.5 A and flags only jumps above 2 eV.
 PATH_JUMP_EV = 2.0
 PATH_MAX_STEP_A = 0.5
 PATH_SPIN_E = 0.5
@@ -290,8 +290,7 @@ def flag_paths(frames):
     n = 0
     for g in groups.values():
         g.sort(key=lambda a: a.info["path_pos"])
-        exact = [a for a in g if not a.info.get("rattled")]  # rattled frames sit between two exact ones
-        pairs = [(a, b, "spin") for a, b in zip(g, g[1:])] + [(a, b, "energy") for a, b in zip(exact, exact[1:])]
+        pairs = [(a, b, t) for a, b in zip(g, g[1:]) for t in ("energy", "spin")]
         for a, b, test in pairs:
             if a.get_chemical_symbols() != b.get_chemical_symbols():
                 continue
