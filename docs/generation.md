@@ -53,6 +53,7 @@ xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, c
 | `xtb.threads`, `xtb.timeout_s` | xtb job 1개의 thread 수와 제한 시간 (분자·cluster 첫 최적화 포함) | `2`, `1800` |
 | `cluster.min_components`, `max_components` | cluster 하나의 분자 + 음이온 개수 범위. `max_components`는 int 또는 양이온 수별 dict | `1`, `{0: 3, 1: 4, 2: 3}` |
 | `cluster.cation_weights` | `max_combos`를 양이온 0/1/2개 조합에 나누는 비율. 양이온 2개 이상 조합은 음이온을 반드시 포함 | `[0.2, 0.7, 0.1]` |
+| `cluster.skip_done` | true면 registry에 이미 있는 조합과 pair_scan 쌍(현재 delta_q 전부에서 기록이 있는 것)을 후보에서 빼고 `max_combos`/`max_pairs`를 새 조합에 씀. 화학종을 늘려 같은 out 폴더에 다시 생성할 때 씀. 결과가 registry 내용에 따라 달라짐 | `false` |
 | `cluster.max_cations` | cluster 하나의 Li+/Na+ 최대 개수 | `2` |
 | `cluster.max_combos` | 전체 조합 중 무작위로 고를 개수 | `50` |
 | `samplers.<이름>.on` | sampler 켜기/끄기 | `true` |

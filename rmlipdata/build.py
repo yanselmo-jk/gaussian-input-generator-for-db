@@ -57,8 +57,9 @@ def composition(names):
     return " ".join(f"{n}{counts[n]}" if not n[-1].isdigit() else f"{n}_{counts[n]}" for n in keys)
 
 
-def combos(cat, cfg_species, cfg_cluster, max_atoms, rng):
-    """All cation/component multisets within max_atoms, deterministically ordered then subsampled by rng."""
+def combos(cat, cfg_species, cfg_cluster, max_atoms, rng, skip=()):
+    """All cation/component multisets within max_atoms, deterministically ordered then subsampled by rng.
+    skip: combos left out before subsampling (cluster.skip_done: already in the registry)."""
     cations = list(cfg_species.get("cations", []))
     comps = list(cfg_species.get("anions", [])) + list(cfg_species.get("solvents", []))
     min_c = int(cfg_cluster.get("min_components", 1))
@@ -74,7 +75,7 @@ def combos(cat, cfg_species, cfg_cluster, max_atoms, rng):
                     if nc >= 2 and not any(cat[n].kind == "anion" for n in cs):
                         continue  # a multi-cation cluster without an anion is not a bound state
                     names = tuple(cats) + tuple(cs)
-                    if sum(n_atoms(cat[n]) for n in names) <= max_atoms:
+                    if sum(n_atoms(cat[n]) for n in names) <= max_atoms and names not in skip:
                         group.append(names)
         groups.append(group)
     if "max_combos" not in cfg_cluster:

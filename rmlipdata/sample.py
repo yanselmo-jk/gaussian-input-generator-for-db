@@ -441,7 +441,8 @@ def _normal_mode(symbols, positions, hessian, T_K, rng, max_move=0.5, tries=100)
 def pair_scan(ctx, scfg, delta_q):
     """Contact pair assembly, then rigid translation of member B along the COM axis at each scale."""
     names = [n for k in ("cations", "anions", "solvents") for n in ctx.cfg["species"].get(k, [])]
-    pairs = [(a, b) for i, a in enumerate(names) for b in names[i:]]
+    skip = ctx.cfg.get("_skip_pairs", ())  # cluster.skip_done
+    pairs = [(a, b) for i, a in enumerate(names) for b in names[i:] if (a, b) not in skip]
     max_pairs = int(scfg.get("max_pairs", 10 ** 9))
     if len(pairs) > max_pairs:
         pairs = [pairs[i] for i in ctx.rng.permutation(len(pairs))[:max_pairs]]

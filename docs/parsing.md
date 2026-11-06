@@ -82,7 +82,7 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 
 ## 다른 machine에서 계산할 때
 
-1. 생성 machine: `rmd generate`, 필요하면 `rmd resources`, 그다음 `rmd submit manifest.csv`.
-2. deck을 원하는 구조로 복사함 (예: `<id>/in.gjf`). deck 안의 title이 id라 이름을 바꿔도 됨. `rmd submit`에 `<id>/in.gjf`를 줘도 title에서 id를 읽음.
+1. 생성 machine: `rmd generate`, 필요하면 `rmd resources`, 그다음 `rmd pack bundle_01 --registry runs/x/registry.sqlite`. `bundle_01.tar.gz`를 계산 machine으로 보냄. pack한 deck은 `submitted`가 되어, 화학종을 바꿔 같은 out 폴더에 다시 생성하면 다음 pack에는 새 deck만 들어감. 전체 순서: docs/workflow.md.
+2. 직접 복사할 때는 `manifest.csv`의 `gjf_path`로 `<id>/in.gjf`를 만들고 `rmd submit manifest.csv`. deck 안의 title이 id라 이름을 바꿔도 되고, `rmd submit`에 `<id>/in.gjf`를 줘도 title에서 id를 읽음.
 3. 계산 machine: 폴더마다 `g16 in.gjf`.
 4. 결과 폴더를 생성 machine으로 가져와 `rmd parse back/ -o data.extxyz --registry runs/x/registry.sqlite`. 계산 중인 job이 섞여 있어도 됨. 다시 parse하면 끝난 job이 추가됨 (extxyz는 매번 새로 씀).

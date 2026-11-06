@@ -40,13 +40,44 @@ def _enabled(sc):
 
 def _combos(cfg, cat):
     return build.combos(cat, cfg["species"], cfg.get("cluster", {}), _max_atoms(cfg),
-                        np.random.default_rng(int(cfg.get("seed", 0)) + zlib.crc32(b"cluster")))
+                        np.random.default_rng(int(cfg.get("seed", 0)) + zlib.crc32(b"cluster")),
+                        skip=cfg.get("_skip_combos", ()))
+
+
+def _with_done(cfg, cat):
+    """cluster.skip_done: leave out combos (and pair_scan pairs) whose every delta_q stage already has records in
+    the registry, so max_combos / max_pairs go to new ones when species are added to an existing out dir. Read
+    once before any stage: the selection must not change while this run writes."""
+    db = Path(cfg["out"]) / "registry.sqlite"
+    if not cfg.get("cluster", {}).get("skip_done") or not db.is_file():
+        return cfg
+    con = registry.connect(db)
+    have = {"pair": set(), "combo": set()}
+    for smp, comp, q, prm in con.execute("SELECT sampler, composition, charge, params FROM structures"):
+        if "vertical_dq" not in (prm or ""):  # a vertical deck's charge is not its own stage
+            have["pair" if smp == "pair_scan" else "combo"].add((comp, q))
+    con.close()
+    ctx = _ctx(cfg, cat, Path(cfg["out"]))
+    dqs = [int(d) for d in cfg.get("charge", {}).get("delta_q", [0])]
+
+    def done(names, kind):
+        comp, f = build.composition(list(names)), sample._formal(ctx, names)
+        return all((comp, f + d) in have[kind] or not sample._q_ok(ctx, f + d, list(names), d) for d in dqs)
+
+    sp = [n for k in ("cations", "anions", "solvents") for n in cfg["species"].get(k, [])]
+    every = build.combos(cat, cfg["species"], {k: v for k, v in cfg.get("cluster", {}).items() if k != "max_combos"},
+                         _max_atoms(cfg), None)
+    out = dict(cfg, _skip_combos={c for c in every if done(c, "combo")},
+               _skip_pairs={(a, b) for i, a in enumerate(sp) for b in sp[i:] if done((a, b), "pair")})
+    print(f"skip_done: {len(out['_skip_combos'])} combos and {len(out['_skip_pairs'])} pairs already in the "
+          "registry are left out", file=sys.stderr)
+    return out
 
 
 def _plan(cfg, cat, names):
     combos = _combos(cfg, cat)
     sp = [n for k in ("cations", "anions", "solvents") for n in cfg["species"].get(k, [])]
-    npairs = len(sp) * (len(sp) + 1) // 2  # all pairs, cation pairs included
+    npairs = len(sp) * (len(sp) + 1) // 2 - len(cfg.get("_skip_pairs", ()))  # all pairs, cation pairs included
     plan = {}
     for name in names:
         scfg = cfg["samplers"][name]
@@ -71,6 +102,7 @@ def _plan(cfg, cat, names):
 
 
 def _dry(cfg, cat, names):
+    cfg = _with_done(cfg, cat)
     for name, k in _plan(cfg, cat, names).items():
         print(f"{name}: {k}")
 
@@ -127,6 +159,7 @@ def generate(cfg, only=None, dry=False):
     os.environ["RMLIPDATA_XTB_THREADS"] = str(threads)
     xtb.CACHE = out / "xtb_cache"
     xtb.TIMEOUT = int(cfg.get("xtb", {}).get("timeout_s", 1800))  # also species / cluster opts
+    cfg = _with_done(cfg, cat)
     con = registry.connect(out / "registry.sqlite")
     gcfg = cfg.get("g16", {})
     nproc, mem = int(gcfg.get("nproc", 16)), gcfg.get("mem", "32GB")
@@ -145,7 +178,8 @@ def generate(cfg, only=None, dry=False):
         return {str(k): canon(v) for k, v in x.items()} if isinstance(x, dict) else \
             [canon(v) for v in x] if isinstance(x, (list, tuple)) else x
 
-    tags = {n: hashlib.sha1(json.dumps(canon([cfg.get("seed", 0), cfg.get("species"), cfg.get("cluster"),
+    tags = {n: hashlib.sha1(json.dumps(canon([cfg.get("seed", 0), cfg.get("species"),
+                                              {k: v for k, v in cfg.get("cluster", {}).items() if k != "skip_done"},
                                               {k: v for k, v in cfg["samplers"][n].items() if k != "high_spin_fraction"}]),
                                        sort_keys=True, default=str).encode()).hexdigest()[:8] for n in names}
     dedup_dropped, seen = Counter(), {}
@@ -351,6 +385,14 @@ def _link0(path):
     return tuple((m[1].strip() if m else "") for m in (LINK0["nproc"].search(text), LINK0["mem"].search(text)))
 
 
+def _deck(out, gjf_path):
+    """A registry gjf_path is relative to the directory rmd generate ran in; from elsewhere use the out dir."""
+    p = Path(gjf_path)
+    if p.is_file() or "gjf" not in p.parts:
+        return p
+    return Path(out) / Path(*p.parts[p.parts.index("gjf"):])
+
+
 def manifest(con, out):
     cols = ["id", "gjf_path", "sampler", "n_atoms", "charge", "mult", "bs", "job", "nproc", "mem"]
     rows = con.execute("SELECT " + ",".join(cols[:8]) + " FROM structures WHERE status='generated' "
@@ -363,7 +405,7 @@ def manifest(con, out):
         w.writerow(cols)
         for r in rows:
             if r["gjf_path"]:
-                w.writerow([r[k] for k in cols[:8]] + list(_link0(r["gjf_path"])))
+                w.writerow([r[k] for k in cols[:8]] + list(_link0(_deck(out, r["gjf_path"]))))
 
 
 def resources_cmd(db, nproc=None, mem=None, samplers=None):
@@ -376,7 +418,7 @@ def resources_cmd(db, nproc=None, mem=None, samplers=None):
         sql += f" AND sampler IN ({','.join('?' * len(samplers))})"
     n = 0
     for (path,) in con.execute(sql, list(samplers or [])).fetchall():
-        p = Path(path)
+        p = _deck(Path(db).parent, path)
         text = p.read_text()
         for key, val in (("nproc", nproc), ("mem", mem)):
             if val is not None:
@@ -508,6 +550,41 @@ def submit_cmd(db, targets, undo=False):
     manifest(con, Path(db).parent)
     con.close()
     print(f"{n} of {len(ids)} decks {'/'.join(old)} -> {new}")
+
+
+def pack_cmd(db, bundle, samplers=None):
+    """Copy every generated deck to <bundle>/<id>/in.gjf, write <bundle>/jobs.csv (id, nproc, mem) and
+    <bundle>.tar.gz, then mark the decks submitted (undo: rmd submit <bundle> --undo)."""
+    import tarfile
+    bundle = Path(bundle)
+    if bundle.exists() or Path(f"{bundle}.tar.gz").exists():
+        raise SystemExit(f"{bundle}: already exists; choose a new bundle name")
+    con = registry.connect(db)
+    q, args = "SELECT id, gjf_path FROM structures WHERE status='generated' AND gjf_path IS NOT NULL", []
+    if samplers:
+        q += f" AND sampler IN ({','.join('?' * len(samplers))})"
+        args += list(samplers)
+    rows = con.execute(q + " ORDER BY sampler, id", args).fetchall()
+    if not rows:
+        raise SystemExit("no generated decks to pack")
+    jobs = []
+    for r in rows:
+        src = _deck(Path(db).parent, r["gjf_path"])
+        (bundle / r["id"]).mkdir(parents=True)
+        shutil.copy(src, bundle / r["id"] / "in.gjf")
+        jobs.append([r["id"], *_link0(src)])
+    with open(bundle / "jobs.csv", "w", newline="") as f:
+        csv.writer(f).writerows([["id", "nproc", "mem"]] + jobs)
+    tmp = Path(f"{bundle}.tar.gz.tmp")
+    with tarfile.open(tmp, "w:gz") as t:
+        t.add(bundle, arcname=bundle.name)
+    os.replace(tmp, f"{bundle}.tar.gz")  # archive complete before any status changes
+    for r in rows:
+        con.execute("UPDATE structures SET status='submitted' WHERE id=? AND status='generated'", (r["id"],))
+    con.commit()
+    manifest(con, Path(db).parent)
+    con.close()
+    print(f"{len(rows)} decks -> {bundle}.tar.gz (marked submitted)")
 
 
 def list_cmd(db, status="submitted", samplers=None):
@@ -681,6 +758,10 @@ def main(argv=None):
     ls.add_argument("--registry", required=True)
     ls.add_argument("--status", default="submitted", choices=("generated", "submitted", "parsed", "failed"))
     ls.add_argument("--sampler", nargs="+", default=None)
+    pk = sub.add_parser("pack", help="bundle generated decks as <id>/in.gjf + tar.gz and mark them submitted")
+    pk.add_argument("bundle", help="new directory name; also writes <bundle>.tar.gz")
+    pk.add_argument("--registry", required=True)
+    pk.add_argument("--sampler", nargs="+", default=None)
     e = sub.add_parser("export", help="registry rows to CSV")
     e.add_argument("--registry", required=True)
     e.add_argument("-o", required=True)
@@ -710,6 +791,8 @@ def main(argv=None):
         status_cmd(a.registry)
     elif a.cmd == "submit":
         submit_cmd(a.registry, a.targets, a.undo)
+    elif a.cmd == "pack":
+        pack_cmd(a.registry, a.bundle, a.sampler)
     elif a.cmd == "list":
         list_cmd(a.registry, a.status, a.sampler)
     elif a.cmd == "resources":

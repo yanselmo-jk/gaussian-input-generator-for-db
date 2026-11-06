@@ -35,6 +35,7 @@ log 파일 이름은 자유로움. `rmd parse`가 log에 적힌 deck title에서
 | `rmd generate CONFIG [--dry] [--only SAMPLER ...]` | 구조 생성, Gaussian 입력 작성 |
 | `rmd parse PATH... -o OUT.extxyz [--registry DB] [--keep-all]` | Gaussian log를 extxyz로 변환. force / ⟨S²⟩ / HOMO 필터 적용. `--registry`를 주면 sampler, 조성, group과 경로 연속성 표시(`path_flag`)를 frame에 붙임. PATH는 log 또는 폴더(하위 폴더 포함). id는 log의 title에서 읽어 파일 이름과 무관함 |
 | `rmd submit TARGET... --registry DB [--undo]` | 제출한 deck 표시 (generated 또는 failed → submitted. failed는 다시 계산할 때). TARGET: id, .gjf, 폴더, manifest .csv |
+| `rmd pack BUNDLE --registry DB [--sampler ...]` | 아직 계산하지 않은(`generated`) deck을 `BUNDLE/<id>/in.gjf`로 복사하고 `BUNDLE/jobs.csv`(id, nproc, mem)와 `BUNDLE.tar.gz`를 만든 뒤 `submitted`로 표시함. 이미 있는 BUNDLE 이름은 거부. 되돌리기: `rmd submit BUNDLE --undo` |
 | `rmd list --registry DB [--status S] [--sampler ...]` | 상태별 deck 목록 (기본 submitted) |
 | `rmd status --registry DB` | sampler별, 상태별 개수 |
 | `rmd export --registry DB -o FILE.csv` | registry를 CSV로 내보내기 |
@@ -49,4 +50,5 @@ log 파일 이름은 자유로움. `rmd parse`가 log에 적힌 deck title에서
 - [docs/generation.md](docs/generation.md): config, sampler, charge/multiplicity, Gaussian 입력
 - [docs/species.md](docs/species.md): 지원 분자, 분자 추가, 구조 보기 (분자, 생성된 `.gjf`)
 - [docs/parsing.md](docs/parsing.md): log parser와 extxyz 형식
+- [docs/workflow.md](docs/workflow.md): production 작업 순서 (생성 machine과 계산 machine이 다를 때)
 - [docs/registry.md](docs/registry.md): SQLite registry 사용법 (DB 입문)

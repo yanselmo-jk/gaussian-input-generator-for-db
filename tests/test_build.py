@@ -833,3 +833,56 @@ def test_bare_cation_ground_state_only(tmp_path):
     cli.generate(cfg, only=["monomer"])
     rows = sorted(sqlite3.connect(tmp_path / "run" / "registry.sqlite").execute("SELECT charge, mult FROM structures"))
     assert rows == [(0, 2), (1, 1)]
+
+
+def test_pack_bundle(tmp_path, monkeypatch):
+    """rmd pack: <bundle>/<id>/in.gjf + jobs.csv + tar.gz, decks marked submitted, manifest emptied; a rerun of
+    generate then packs only new decks."""
+    import sqlite3, tarfile
+    from rmlipdata import cli
+    monkeypatch.chdir(tmp_path)
+    cfg = {"out": "run", "seed": 0, "species": {"solvents": ["H2O"]}, "charge": {"delta_q": [0]},
+           "samplers": {"atoms": {"on": True}}}
+    cli.generate(cfg, only=["atoms"])
+    db = "run/registry.sqlite"
+    n = sqlite3.connect(db).execute("SELECT COUNT(*) FROM structures").fetchone()[0]
+    monkeypatch.chdir(tmp_path / "run")                         # gjf_path is relative to tmp_path: fallback
+    cli.main(["resources", "--registry", "registry.sqlite", "--nproc", "8"])  # also from another directory
+    cli.main(["pack", "../b1", "--registry", "registry.sqlite"])
+    names = tarfile.open(tmp_path / "b1.tar.gz").getnames()
+    assert sum(x.endswith("/in.gjf") for x in names) == n and "b1/jobs.csv" in names
+    assert {r[0] for r in sqlite3.connect("registry.sqlite").execute("SELECT status FROM structures")} == {"submitted"}
+    assert len(open("manifest.csv").read().splitlines()) == 1
+    sid = next(p.name for p in (tmp_path / "b1").iterdir() if p.is_dir())
+    assert sid in (tmp_path / "b1" / sid / "in.gjf").read_text()  # title = id
+    assert "%nprocshared=8" in (tmp_path / "b1" / sid / "in.gjf").read_text()
+    assert open(tmp_path / "b1" / "jobs.csv").read().splitlines()[1].endswith(",8,32GB")
+    import pytest
+    with pytest.raises(SystemExit):
+        cli.main(["pack", "../b2", "--registry", "registry.sqlite"])  # nothing new
+
+
+def test_skip_done(tmp_path):
+    """cluster.skip_done: combos and pairs already in the registry at every delta_q leave max_combos / max_pairs
+    to new ones; without the flag the selection is unchanged."""
+    import copy
+    from rmlipdata import cli, species, build
+    cfg = {"out": str(tmp_path / "run"), "seed": 0, "species": {"cations": ["Li"], "solvents": ["H2O"]},
+           "charge": {"delta_q": [0], "high_spin_fraction": 0.0, "vertical_fraction": 0.0},
+           "cluster": {"max_components": 2, "max_cations": 1, "max_combos": 2},
+           "samplers": {"cluster": {"on": True, "n_distort": 0},
+                        "pair_scan": {"on": True, "max_pairs": 2, "n_orient": 1, "scales": [1.0]}}}
+    cli.generate(cfg)
+    cat = species.catalog()
+    first = set(cli._combos(cfg, cat))
+    import sqlite3
+    assert len(first) == 2 and sqlite3.connect(tmp_path / "run" / "registry.sqlite").execute(
+        "SELECT COUNT(*) FROM structures WHERE sampler='cluster'").fetchone()[0] > 0
+    cfg2 = copy.deepcopy(cfg)
+    cfg2["species"]["solvents"] = ["H2O", "HF"]
+    cfg2["cluster"]["skip_done"] = True
+    c2 = cli._with_done(cfg2, cat)
+    assert first <= c2["_skip_combos"] and not first & set(cli._combos(c2, cat)) and len(cli._combos(c2, cat)) == 2
+    assert c2["_skip_pairs"] and all(p not in c2["_skip_pairs"] for p in [("H2O", "HF"), ("HF", "HF")])
+    cfg2["charge"]["delta_q"] = [0, -1]                         # a new charge stage: old combos are not done
+    assert not cli._with_done(cfg2, cat)["_skip_combos"] & {c for c in first if "Li" in c}

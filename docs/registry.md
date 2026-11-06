@@ -17,7 +17,7 @@
 | `bs` | BS singlet 여부 (0/1) |
 | `job` | `sp` 또는 `opt` |
 | `params` | sampler별 상세 정보. JSON 문자열 (scan 좌표, 경로 index, template, `is_peak` 등). xTB SCC가 수렴하지 않아 `--etemp 1000`으로 다시 돌린 구조에는 `xtb_etemp_K: 1000`이 붙음 |
-| `gjf_path`, `log_path` | 입력 파일과 log 파일 경로 |
+| `gjf_path`, `log_path` | 입력 파일과 log 파일 경로. `gjf_path`는 `rmd generate`를 실행한 폴더 기준. 다른 폴더에서 `rmd pack`, `rmd resources`, manifest를 쓰면 registry 폴더 아래 `gjf/`에서 찾음 |
 | `status` | `generated` (입력만 있음) → `submitted` (`rmd submit`으로 표시함) → `parsed` (log 읽음) 또는 `failed` (`Error termination`). 종료 줄이 없는 log는 status를 바꾸지 않음. 다시 계산할 `failed` deck도 `rmd submit`으로 `submitted`가 됨 |
 | `created` | 생성 시각 |
 
