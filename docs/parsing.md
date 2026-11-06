@@ -12,7 +12,7 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
   - 모든 job step이 정상 종료되고 frame이 있으면 `parsed`.
   - `Error termination`이 있으면 `failed` (frame은 씀).
   - 둘 다 없으면 (계산 중, walltime 초과로 끊김) frame을 쓰지 않고 status를 바꾸지 않음. 개수만 출력함. 끊긴 job은 `rmd list`(status `submitted`)로 찾아 다시 계산함.
-- 순서: extxyz를 임시 파일에 다 쓰고 교체한 다음 registry 변경을 확정함. 그래서 저장에 실패하면 registry가 바뀌지 않음.
+- 순서: extxyz를 임시 파일에 다 쓰고 교체한 다음 registry 변경을 확정함. 그래서 저장에 실패하면 registry가 바뀌지 않음. 남은 frame이 없으면 빈 extxyz를 씀 (이전 parse 결과가 남지 않게).
 - `--registry` 파일이 없으면 멈춤 (경로 오타로 빈 DB가 생기지 않게). parse는 extxyz를 쓴 뒤 status를 한 번에 기록함. 다른 `rmd` 명령이 registry를 쓰는 중이면 최대 10분 기다림.
 
 ## Frame을 나누는 규칙

@@ -820,3 +820,16 @@ def test_multi_radical_bs():
     ctx = SimpleNamespace(cat=species.catalog())
     assert _multi_radical(ctx, ["CH3O", "CH3O"]) and _multi_radical(ctx, ["Li", "EC_ro", "CH3O"])
     assert not _multi_radical(ctx, ["CH3O", "EC"]) and not _multi_radical(ctx, ["Li", "EC", "PF6"])
+    from rmlipdata.sample import _bs
+    assert _bs(ctx, ["Li", "Li", "PF6", "EC"], -2) and not _bs(ctx, ["Li", "EC", "PF6"], -1)
+
+
+def test_bare_cation_ground_state_only(tmp_path):
+    """Li+ monomer: singlet only even at high_spin_fraction 1 (the triplet is a 59 eV core excitation)."""
+    import sqlite3
+    from rmlipdata import cli
+    cfg = {"out": str(tmp_path / "run"), "seed": 0, "species": {"cations": ["Li"]},
+           "charge": {"delta_q": [0, -1], "high_spin_fraction": 1.0}, "samplers": {"monomer": {"on": True}}}
+    cli.generate(cfg, only=["monomer"])
+    rows = sorted(sqlite3.connect(tmp_path / "run" / "registry.sqlite").execute("SELECT charge, mult FROM structures"))
+    assert rows == [(0, 2), (1, 1)]

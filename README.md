@@ -26,7 +26,7 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite   # 4. lo
 rmd status --registry runs/example/registry.sqlite                       # 5. 진행 상황
 ```
 
-log 파일명은 `.gjf`와 같게 유지해야 함 (`<id>.gjf` → `<id>.log`).
+log 파일 이름은 자유로움. `rmd parse`가 log에 적힌 deck title에서 id를 읽음 (예: `<id>/in.gjf` → `<id>/in.log`).
 
 ## 명령어
 
@@ -34,7 +34,7 @@ log 파일명은 `.gjf`와 같게 유지해야 함 (`<id>.gjf` → `<id>.log`).
 |---|---|
 | `rmd generate CONFIG [--dry] [--only SAMPLER ...]` | 구조 생성, Gaussian 입력 작성 |
 | `rmd parse PATH... -o OUT.extxyz [--registry DB] [--keep-all]` | Gaussian log를 extxyz로 변환. force / ⟨S²⟩ / HOMO 필터 적용. `--registry`를 주면 sampler, 조성, group과 경로 연속성 표시(`path_flag`)를 frame에 붙임. PATH는 log 또는 폴더(하위 폴더 포함). id는 log의 title에서 읽어 파일 이름과 무관함 |
-| `rmd submit TARGET... --registry DB [--undo]` | 제출한 deck 표시 (generated → submitted). TARGET: id, .gjf, 폴더, manifest .csv |
+| `rmd submit TARGET... --registry DB [--undo]` | 제출한 deck 표시 (generated 또는 failed → submitted. failed는 다시 계산할 때). TARGET: id, .gjf, 폴더, manifest .csv |
 | `rmd list --registry DB [--status S] [--sampler ...]` | 상태별 deck 목록 (기본 submitted) |
 | `rmd status --registry DB` | sampler별, 상태별 개수 |
 | `rmd export --registry DB -o FILE.csv` | registry를 CSV로 내보내기 |

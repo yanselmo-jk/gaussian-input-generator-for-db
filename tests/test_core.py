@@ -186,3 +186,11 @@ def test_parse_dir_layout_id_from_title(tmp_path):
     assert not (tmp_path / "typo.sqlite").exists()
     (tmp_path / "back" / sid / "in.gjf").write_text(f"%mem=1GB\n#p sp\n\n{sid}\n\n0 2\n")
     assert cli._ids([str(tmp_path / "back" / sid / "in.gjf")]) == [sid]
+    cli.submit_cmd(str(tmp_path / "registry.sqlite"), ["monomer-ffffffffffff"])  # rerun of a failed deck
+    assert con.execute("SELECT status FROM structures WHERE id='monomer-ffffffffffff'").fetchone()[0] == "submitted"
+    import shutil
+    shutil.rmtree(tmp_path / "back" / sid)
+    shutil.rmtree(tmp_path / "back" / "monomer-eeeeeeeeeeee")
+    shutil.rmtree(tmp_path / "back" / "z_dup")
+    cli.parse_cmd([str(tmp_path / "back")], str(tmp_path / "d.extxyz"), db=str(tmp_path / "registry.sqlite"))
+    assert (tmp_path / "d.extxyz").read_text() == ""                  # no stale frames from the previous parse

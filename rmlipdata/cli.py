@@ -126,6 +126,7 @@ def generate(cfg, only=None, dry=False):
     nmax = max(1, int(xcfg.get("n_max_process", 2)))
     os.environ["RMLIPDATA_XTB_THREADS"] = str(threads)
     xtb.CACHE = out / "xtb_cache"
+    xtb.TIMEOUT = int(cfg.get("xtb", {}).get("timeout_s", 1800))  # also species / cluster opts
     con = registry.connect(out / "registry.sqlite")
     gcfg = cfg.get("g16", {})
     nproc, mem = int(gcfg.get("nproc", 16)), gcfg.get("mem", "32GB")
@@ -444,10 +445,12 @@ def parse_cmd(paths, out, db=None, keep_all=False):
         if not why:
             kept.append(a)
     frames = kept
-    if frames:  # write first: a failed write must not leave 'parsed' rows without data
-        tmp = Path(f"{out}.tmp")
+    tmp = Path(f"{out}.tmp")  # write first: a failed write must not leave 'parsed' rows without data
+    if frames:
         ase_write(tmp, frames, format="extxyz")
-        os.replace(tmp, out)
+    else:
+        tmp.write_text("")  # an empty result replaces an older file: no stale frames
+    os.replace(tmp, out)
     if con:  # one short write transaction after the extxyz: generate on the same registry is blocked only briefly
         for sid, status, log in updates:
             if not registry.set_status(con, sid, status, log):
@@ -494,16 +497,17 @@ def _gjf_id(path):
 
 
 def submit_cmd(db, targets, undo=False):
-    """Mark decks submitted (generated -> submitted) so the manifest no longer lists them; undo reverses it."""
-    old, new = ("submitted", "generated") if undo else ("generated", "submitted")
+    """Mark decks submitted (generated or failed -> submitted: a rerun) so the manifest no longer lists them;
+    undo sets submitted -> generated."""
+    old, new = (("submitted",), "generated") if undo else (("generated", "failed"), "submitted")
     ids = _ids(targets)
     con = registry.connect(db)
-    n = sum(con.execute("UPDATE structures SET status=? WHERE id=? AND status=?", (new, i, old)).rowcount
-            for i in ids)
+    n = sum(con.execute(f"UPDATE structures SET status=? WHERE id=? AND status IN ({','.join('?' * len(old))})",
+                        (new, i, *old)).rowcount for i in ids)
     con.commit()
     manifest(con, Path(db).parent)
     con.close()
-    print(f"{n} of {len(ids)} decks {old} -> {new}")
+    print(f"{n} of {len(ids)} decks {'/'.join(old)} -> {new}")
 
 
 def list_cmd(db, status="submitted", samplers=None):

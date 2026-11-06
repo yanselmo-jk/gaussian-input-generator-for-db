@@ -125,6 +125,12 @@ def _multi_radical(ctx, names):
                for m in (Chem.MolFromSmiles(ctx.cat[n].smiles or "") for n in names) if m is not None) >= 2
 
 
+def _bs(ctx, names, delta_q):
+    """BS singlet: two or more radical members, or delta_q <= -2 (_q_ok: one Li/Na per added electron, i.e. two
+    reduced metal centres)."""
+    return int(delta_q) <= -2 or _multi_radical(ctx, names)
+
+
 def _rec(ctx, symbols, positions, charge, sampler, names, job, bs, params):
     return dict(symbols=[str(s) for s in symbols], positions=np.asarray(positions, float), charge=int(charge),
                 sampler=sampler, composition=build.composition(list(names)), job=job, bs=bool(bs),
@@ -320,8 +326,9 @@ def monomer(ctx, scfg, delta_q):
             if sp.kind == "cation":
                 if q > 1:  # bare Li2+/Na2+ is not an electrolyte state
                     continue
-                yield _rec(ctx, [name], np.zeros((1, 3)), q, "monomer", [name], "sp", False,
-                           {"kind": "cation", "index": 0})
+                yield dict(_rec(ctx, [name], np.zeros((1, 3)), q, "monomer", [name], "sp", False,
+                                {"kind": "cation", "index": 0}),
+                           mults=[_hund_mult(n_electrons([name], q))])  # Li+ triplet is a 1s2s core excitation
                 n += 1
                 continue
             symbols, positions, mol = species.geometry(sp, ctx.workdir, charge=q)
@@ -473,13 +480,13 @@ def pair_scan(ctx, scfg, delta_q):
                     break
                 u = (_com(pos, ib) - _com(pos, ia)) / d0
                 r = None
-                if _min_between(pos, ia, ib) > 3.0:  # gas-phase xTB opt left a neutral pair apart: bring into contact
+                if _min_between(pos, ia, ib) > 3.0:  # gas-phase xTB opt left the pair apart: bring into contact
                     pos = _shift_to(pos, ia, ib, u, 2.5, d0)
                     r = xtb.run_xtb(cl["symbols"], pos, q, _uhf(cl["symbols"], q), ctx.workdir, mode="opt",
                                     timeout=_timeout(ctx))
                     new = np.asarray(r["positions"], float) if r.get("ok") and "positions" in r else None
-                    if new is not None and not (r.get("etemp_K") and _min_between(new, ia, ib) > 3.0):
-                        pos = new  # a smeared opt that pushed the pair apart again keeps the 2.5 A contact
+                    if new is not None and _min_between(new, ia, ib) <= 3.0:
+                        pos = new  # an opt that pushes the pair apart again (e.g. two anions) keeps the 2.5 A contact
                     else:
                         r = None
                     d0 = float(np.linalg.norm(_com(pos, ib) - _com(pos, ia)))
@@ -495,7 +502,7 @@ def pair_scan(ctx, scfg, delta_q):
                 if n >= _limit(scfg):
                     return
                 moved = _shift_to(pos, ia, ib, u, s * dc, d0)
-                yield _rec(ctx, cl["symbols"], moved, q, "pair_scan", pair, "sp", _multi_radical(ctx, pair),
+                yield _rec(ctx, cl["symbols"], moved, q, "pair_scan", pair, "sp", _bs(ctx, pair, delta_q),
                            {"pair": list(pair), "orient": orient, "scale": float(s), "contact_A": dc,
                             "d_min_A": _min_between(moved, ia, ib)} | extra | _etemp(cl, r))
                 n += 1
@@ -512,7 +519,7 @@ def cluster(ctx, scfg, delta_q):
         if cl is None:
             continue
         rng = _stream(ctx, "cluster", combo, q)
-        yield _rec(ctx, cl["symbols"], cl["positions"], q, "cluster", combo, "opt", _multi_radical(ctx, combo),
+        yield _rec(ctx, cl["symbols"], cl["positions"], q, "cluster", combo, "opt", _bs(ctx, combo, delta_q),
                    {"combo": list(combo), "kind": "opt"} | _etemp(cl))
         n += 1
         if n >= _limit(scfg):
@@ -527,7 +534,7 @@ def cluster(ctx, scfg, delta_q):
                 pos = _rattle(cl["positions"], float(sigma), rng)
                 if pos is None:
                     continue
-                yield _rec(ctx, cl["symbols"], pos, q, "cluster", combo, "sp", _multi_radical(ctx, combo),
+                yield _rec(ctx, cl["symbols"], pos, q, "cluster", combo, "sp", _bs(ctx, combo, delta_q),
                            {"combo": list(combo), "kind": "distort", "index": k,
                             "sigma_A": float(sigma)} | _etemp(cl))
                 n += 1
@@ -547,7 +554,7 @@ def cluster(ctx, scfg, delta_q):
                 moved[idxs] += (float(f) - 1.0) * (_com(cl["positions"], idxs) - com)
             if _too_close(cl["symbols"], moved, 0.7, other):
                 continue  # rigid dilation pushed two members into each other
-            yield _rec(ctx, cl["symbols"], moved, q, "cluster", combo, "sp", _multi_radical(ctx, combo),
+            yield _rec(ctx, cl["symbols"], moved, q, "cluster", combo, "sp", _bs(ctx, combo, delta_q),
                        {"combo": list(combo), "kind": "dilate", "factor": float(f)} | _etemp(cl))
             n += 1
         cats = [(name, idxs) for name, idxs in cl["members"] if ctx.cat[name].kind == "cation"]
@@ -569,7 +576,7 @@ def cluster(ctx, scfg, delta_q):
                 moved[idxs] += (float(f) - 1.0) * _min_between(cl["positions"], cats[0][1], idxs) * u / d
             if _too_close(cl["symbols"], moved, 0.7):
                 continue
-            yield _rec(ctx, cl["symbols"], moved, q, "cluster", combo, "sp", _multi_radical(ctx, combo),
+            yield _rec(ctx, cl["symbols"], moved, q, "cluster", combo, "sp", _bs(ctx, combo, delta_q),
                        {"combo": list(combo), "kind": "m_stretch", "factor": float(f)} | _etemp(cl))
             n += 1
 
@@ -1258,7 +1265,7 @@ def hop(ctx, scfg, delta_q):
                     if not ok_at(cur):
                         continue  # cation runs into an atom: no useful PES point
                     rr = _rattled(cur, sigma, np.random.default_rng([pseed, kt]), ok_at) if kt % 2 == 0 else None
-                    yield _rec(ctx, symbols, cur if rr is None else rr, q, "hop", combo, "sp", False,
+                    yield _rec(ctx, symbols, cur if rr is None else rr, q, "hop", combo, "sp", _bs(ctx, combo, delta_q),
                                {"kind": "hop", "cation": cation, "cation_index": int(m), "from_donor": d1,
                                 "to_donor": int(d2), "t": float(t),
                                 "d_from_A": float(np.linalg.norm(cur[m] - cur[d1])),
@@ -1301,7 +1308,7 @@ def hop(ctx, scfg, delta_q):
                     if not ok_at(frame):
                         continue  # cation runs into an atom, as in the hop guard
                     rr = _rattled(frame, sigma, prng, ok_at) if e % 2 else None
-                    yield _rec(ctx, symbols, frame if rr is None else rr, q, "hop", combo, "sp", False,
+                    yield _rec(ctx, symbols, frame if rr is None else rr, q, "hop", combo, "sp", _bs(ctx, combo, delta_q),
                                {"kind": "exchange_out", "cation_index": int(m), "donor": int(d),
                                 "r_A": float(np.linalg.norm(frame[m] - frame[d])), "index": k,
                                 "E_xtb_eV": float(energy)}
@@ -1398,7 +1405,7 @@ def cluster_md(ctx, scfg, delta_q):
                     return
                 n += 1
                 rmsd = None if j == 0 else min(_rmsd(cand[p], cand[h]) for h in picked[:j])
-                yield _rec(ctx, symbols, cand[p], q, "cluster_md", names, "sp", _multi_radical(ctx, names),
+                yield _rec(ctx, symbols, cand[p], q, "cluster_md", names, "sp", _bs(ctx, names, delta_q),
                            {"T_K": float(T), "frame": int(idx[p]), "rmsd_min_A": rmsd, "names": list(names)}
                            | _etemp(r))
 

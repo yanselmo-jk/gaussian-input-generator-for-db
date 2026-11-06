@@ -28,6 +28,7 @@ XTB_MISSING = "xtb not found on PATH: run `conda activate rmlipdata` (or conda i
 CALLS = 0  # xTB invocations since process start, shown in the generate progress line
 HITS = 0   # run_xtb results served from CACHE
 CACHE = None  # result cache directory (rmd generate sets <out>/xtb_cache); None = no cache
+TIMEOUT = 1800  # default per-call limit (s); rmd generate sets xtb.timeout_s
 
 
 def find_xtb() -> str:
@@ -201,12 +202,13 @@ def _xyz(symbols, positions):
     return f"{len(symbols)}\n\n" + "".join(f"{s} {x:.8f} {y:.8f} {z:.8f}\n" for s, (x, y, z) in zip(symbols, positions))
 
 
-def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(), scan=None, fix=(), timeout=1800,
+def run_xtb(symbols, positions, charge, uhf, workdir, mode="sp", constraints=(), scan=None, fix=(), timeout=None,
             etemp=None, md=None):
     """_run_xtb behind a result cache: the key is a sha1 of the exact xtb input (mol.xyz text, job.inp / md.inp text,
     mode, charge, uhf, etemp, xtb binary path and mtime), so a rerun gets the same structures without running xtb.
     Only successful results are stored. md = dict(T_K, time_ps, dump_fs, wall_R_A) runs a gas-phase MD instead."""
     global HITS
+    timeout = TIMEOUT if timeout is None else timeout
     if not CACHE:
         return _run_xtb(symbols, positions, charge, uhf, workdir, mode, constraints, scan, fix, timeout, etemp, md)
     exe = shutil.which("xtb") or ""
