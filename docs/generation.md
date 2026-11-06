@@ -12,6 +12,8 @@
    - vertical deck과 stage 구조가 같은 deck(같은 id)이면 stage 구조의 params가 남고 `parent_id`는 비움.
 5. 마지막에 `manifest.csv`를 다시 씀.
 
+example config는 불순물·생성물(H2O, HF, PF5, POF3, CO2, LiF, LEDC, VC, CH3O, EC_ro), Δq −2, sampler별 고스핀 비율(평형 쪽 0.1, scan 1.0, hop 0.25)을 포함함.
+
 실행 중 경고는 `<out>/warnings.log`에 기록되고, 끝에 종류별 개수만 출력됨. stage마다 같은 cluster를 다시 만들어 같은 경고가 반복되므로, 여러 stage에서 나온 같은 문장은 한 stage에서 가장 많이 나온 횟수만 남김. 그래서 서로 다른 stage에서 따로 생긴 같은 문장의 경고는 덜 세어질 수 있음. 같은 config로 다시 실행하면 이미 있는 구조는 건너뜀. `--only bond_scan1 reaction`처럼 sampler 일부만 실행해도 cluster 구조는 같게 나옴 (cluster마다 seed가 고정됨).
 
 xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, constraint/scan 입력, charge, uhf, etemp, xtb binary 경로와 수정 시각)의 sha1임. 다시 실행하면 xtb를 돌리지 않고 같은 구조를 받아 registry에서 기존 id로 걸러짐. 결과는 JSON 파일(`<key>.json`)로 저장됨. v0.1.9 이전의 pickle cache는 쓰지 않으므로 처음 실행 때 xTB를 다시 계산함. 실패한 계산은 저장하지 않음. xtb를 다시 돌리려면 이 폴더를 지움.
@@ -45,9 +47,12 @@ xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, c
 | `limits.dedup_A` | 중복 구조 판정 거리 (원자 최대 변위). 0이면 끔 | `0.03` |
 | `samplers.<이름>.high_spin_fraction` | 그 sampler에만 적용하는 `charge.high_spin_fraction` | scan sampler `0.25` |
 | `samplers.<이름>.max_atoms` | 그 sampler에만 적용하는 원자 수 상한 (`cluster_md`) | `100` |
+| `samplers.<이름>.path_rattle_A` | 경로 frame 두 개 중 하나를 σ로 흔든 구조로 바꿈 (bond_scan1/2, reaction/2, hop). params `rattle_A` | `0.07` |
+| `samplers.reaction.peak_rattle_n` | 최고점 frame을 흔든 복사본 수. params `peak_rattle` | `2` |
 | `xtb.n_max_process` | 동시에 실행할 stage 수. CPU 사용량은 약 n_max_process × threads | `2` |
 | `xtb.threads`, `xtb.timeout_s` | xtb job 1개의 thread 수와 제한 시간 | `2`, `1800` |
-| `cluster.min_components`, `max_components` | cluster 하나의 분자 + 음이온 개수 범위 | `1`, `3` |
+| `cluster.min_components`, `max_components` | cluster 하나의 분자 + 음이온 개수 범위. `max_components`는 int 또는 양이온 수별 dict | `1`, `{0: 3, 1: 4, 2: 3}` |
+| `cluster.cation_weights` | `max_combos`를 양이온 0/1/2개 조합에 나누는 비율. 양이온 2개 이상 조합은 음이온을 반드시 포함 | `[0.2, 0.7, 0.1]` |
 | `cluster.max_cations` | cluster 하나의 Li+/Na+ 최대 개수 | `2` |
 | `cluster.max_combos` | 전체 조합 중 무작위로 고를 개수 | `50` |
 | `samplers.<이름>.on` | sampler 켜기/끄기 | `true` |
@@ -58,8 +63,9 @@ xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, c
 | sampler | 만드는 구조 | 주요 설정 | job |
 |---|---|---|---|
 | `monomer` | 분자/음이온 최적화 구조, normal-mode 변형, torsion/angle 변형, 단원자 양이온 | `n_normal_mode`, `n_distort`, `T_K` | opt / sp |
+| `atoms` | 단원자 기준 deck: 설정한 종의 모든 원소, charge −1/0/+1 (H⁺ 제외). delta_q 0 stage에서만, vertical deck 없음 | `high_spin_fraction` (1.0 권장: N 4중항 같은 Hund 바닥 상태) | sp |
 | `pair_scan` | 두 성분의 거리를 바꾼 binding curve. 양이온 쌍(Li–Li, Li–Na, Na–Na) 포함 | `max_pairs`, `n_orient`, `scales` | sp |
-| `cluster` | M+(solvent)n(anion)m 최적화 구조, 흔든 구조, 늘이거나 줄인 구조 | `n_distort`, `rattle_A` (숫자나 목록, 기본 0.05 Å, xTB 기준 원자당 약 0.1 eV), `dilate` | opt / sp |
+| `cluster` | M+(solvent)n(anion)m 최적화 구조, 흔든 구조, 늘이거나 줄인 구조 | `n_distort`, `rattle_A` (숫자나 목록, 기본 0.05 Å, xTB 기준 원자당 약 0.1 eV), `dilate`, `m_stretch` | opt / sp |
 | `cluster_md` | 양이온 1개 + 용매 n개(+ 음이온)의 xTB MD frame을 RMSD로 골라 씀 | `n_solvent`, `with_anion`, `T_K`, `time_ps`, `equil_ps`, `dump_fs`, `n_frames`, `max_clusters`, `max_atoms` | sp |
 | `bond_scan1` | bond 하나를 끊어질 때까지 늘이며 xTB로 relax한 scan | `n_points`, `max_bonds_per_cluster`, `bs` | sp |
 | `bond_scan2` | 같은 bond를 IDPP interpolation으로 늘인 경로. 끝점만 xTB 최적화. 고리가 아닌 bond는 더 먼 해리 점 | `n_points`, `max_bonds_per_cluster`, `bs`, `far_A` | sp |
@@ -119,6 +125,7 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
 - **cluster**
   - `rattle_A` 목록: σ마다 `n_distort`개. params `sigma_A`.
   - `dilate`: 성분을 강체로 두고 질량중심만 cluster 중심에서 배율만큼 옮김. params `kind: dilate`, `factor`. 압축(0.9)은 반발 영역, 팽창(1.1, 1.25)은 해리 쪽 구조.
+  - `m_stretch`: 양이온 1개인 cluster에서 리간드를 강체로 양이온에서 멀어지게 옮겨 최단 양이온–리간드 거리를 배율만큼 늘림. GFN2-xTB의 M–O 거리가 짧기 때문 (Li–O 1.66 Å, Na–O 1.89 Å, xTB, 우리 계산). params `kind: m_stretch`, `factor`.
 - **cluster_md**
   - 조성: 양이온 1개 + 용매 `n_solvent`개. `n_solvent`는 목록 또는 양이온별 dict (`{Li: [3, 4, 5], Na: [4, 5, 6]}`). `with_anion: true`면 용매 하나를 음이온으로 바꾼 조성도 만듦. 원자 수는 `max_atoms`(없으면 `limits.max_atoms`) 이하만.
   - 조립(cluster와 같은 배치) 후 원점 중심으로 옮겨 xTB MD(GFN2, `T_K`마다 `time_ps`). 구 벽(wall) 반지름 = 원점에서 가장 먼 원자까지 거리 + 2 Å, 성분 증발 방지.
@@ -152,6 +159,7 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
     - `h_abstract`: radical 원자가 다른 성분의 H를 빼앗음
     - `intra_shift`: 한 분자 안에서 H/F가 2–3 bond 떨어진 원자로 이동
     - `ring_open_M`: 양이온이 고리 O(이중결합 없는 O)에 다가가며 고리 C–O가 끊어짐
+    - `h_transfer_ox`: 산화(Δq > 0) cluster에서만. 한 성분의 C–H의 H가 다른 중성 성분의 carbonyl O나 음이온의 F/O/N으로 이동. 출처: Borodin & Xing, PCCP 14, 12838 (2012) (EC 라디칼 양이온의 ethylene H를 이웃 EC carbonyl O가 가져감); Xing et al., J. Phys. Chem. A 115, 13896 (2011) (PC–PF6 산화 첫 단계에서 HF + PF5)
   - radical 원자는 SMILES의 radical 표시로 찾음 (현재 EC_ro, MeOCO2, CH3, CH3O).
   - Δq ≠ 0이면 xTB 부분전하 변화로도 찾음: q와 q − Δq에서 xTB sp를 돌려, 환원이면 전하가 0.15 e 이상 줄어든 원자, 산화면 0.15 e 이상 늘어난 원자 (H, Li, Na 제외, 최대 2개). SMILES에 radical 표시가 없는 radical 이온(예: 환원된 EC)도 `radical_couple`, `h_abstract`에 쓰임. params `charge_radicals`.
   - 후보는 template별로 섞고 template 순서도 무작위로 정한 뒤 돌아가며 `max_per_cluster`개를 고름. `intra_shift` 후보가 다른 template보다 훨씬 많아 다른 template이 뽑히지 않던 문제 때문임.
@@ -184,6 +192,7 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
 - `bs: true`인 sampler는 전자 수가 짝수일 때 singlet을 BS(broken-symmetry) singlet(`guess=mix`)으로만 만듦. homolytic 절단 경로를 위한 것임.
 - xTB 경로는 charge마다 따로 계산함 (uhf = 전자 수 % 2). 같은 경로를 여러 multiplicity로 계산함.
 - 환원(Δq < 0)은 전체 전하가 −1 이상이면서 Li/Na가 있거나 중성 radical(예: CH3O)이 있는 계에만 만듦. 양이온 없는 용매·음이온의 추가 전자나 dianion은 기체상에서 결합하지 않아 diffuse basis 꼬리에 갇힌 가짜 상태가 됨 (Li + 2 PF6의 q = −2도 Li⁰ + 2 PF6⁻라 제외). GFN2-xTB는 이를 판별하지 못함: H2O⁻ vertical detachment energy +3.8 eV, DME⁻ +5.7 eV (2026-11-05, 우리 계산).
+- Δq ≤ −2는 Li/Na를 가진 성분 수가 |Δq| 이상인 계에만 만듦 (전자 하나당 Li/Na 하나).
 - 원자 겹침 판정은 f × (공유결합 반지름 합)과 0.6 Å 중 큰 값을 씀 (H–H는 0.7배가 0.43 Å라 하한을 둠).
 
 ## Gaussian 입력
@@ -191,7 +200,7 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
 ```
 %nprocshared=16
 %mem=32GB
-#p {R|U}wB97XD/gen nosymm int=ultrafine scf=(xqc,maxcycle=300) pop=(npa) iop(6/80=1) force | pop=(npa,always) iop(6/80=1) opt=(maxcycles=200) [guess=mix]
+#p {R|U}wB97XD/gen nosymm int=ultrafine scf=(xqc,maxcycle=300) pop=(npa,hirshfeld) iop(6/80=1) force | pop=(npa,hirshfeld,always) iop(6/80=1) opt=(maxcycles=200) [guess=mix]
 
 <id>
 
@@ -203,7 +212,7 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
 
 - `R`은 closed-shell singlet에 씀. multiplicity > 1이거나 BS singlet이면 `U`.
 - `nosymm`을 써서 force가 입력 좌표계로 나옴.
-- `pop=(npa)`는 NBO natural charge, `iop(6/80=1)`은 Loewdin population을 출력하게 함. opt job은 `pop=(npa,always)`로 매 step population을 출력함 (`g16.pop_always: false`면 `pop=(npa)`).
+- `pop=(npa,hirshfeld)`는 NBO natural charge와 Hirshfeld charge·spin, CM5 charge를, `iop(6/80=1)`은 Loewdin population을 출력하게 함. opt job은 `pop=(npa,hirshfeld,always)`로 매 step population을 출력함 (`g16.pop_always: false`면 `pop=(npa,hirshfeld)`).
 - basis는 `rmlipdata/data/basis/def2-TZVPPD.gbs`에서 구조에 있는 원소만 붙임.
   - 출처: Basis Set Exchange 0.12.
   - 포함 원소: H–Kr(Z 1–36)의 36개 원소. def2에서 이 원소들은 ECP 없이 모든 전자를 계산함.

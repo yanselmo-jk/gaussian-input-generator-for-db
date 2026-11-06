@@ -5,7 +5,8 @@ from pathlib import Path
 from ase.data import atomic_numbers
 
 BASIS_FILE = Path(__file__).parent / "data" / "basis" / "def2-TZVPPD.gbs"
-# iop(6/80=1): Loewdin population; pop=npa: NBO natural population analysis.
+# iop(6/80=1): Loewdin population; pop=npa: NBO natural population analysis; pop=hirshfeld: Hirshfeld charges and
+# spin densities + CM5 charges (format confirmed on G16 c02, Hangang job 1224122, 2026-11-06).
 # Basis file covers H-Kr (Z 1-36), all-electron in def2 (no ECP); Rb and heavier would need genecp.
 # Output formats confirmed on G16 c02 (Hangang job 1212786, 2026-11-04); see docs/parsing.md.
 # opt: pop=always prints Mulliken / Loewdin / NPA at every step (Hangang G16 c02 job 1217563, 2026-11-05)
@@ -41,7 +42,7 @@ def spin_states(symbols, charge, offsets=(0, 2), bs=False):
 def route(mult, bs, job, pop_always=True):
     """R for closed-shell singlet, U otherwise; BS singlet adds guess=mix; opt adds pop=always unless switched off."""
     ref = "U" if (mult > 1 or bs) else "R"
-    r = ROUTE.format(ref=ref, pop="npa,always" if job == "opt" and pop_always else "npa") + " " + JOB[job]
+    r = ROUTE.format(ref=ref, pop="npa,hirshfeld,always" if job == "opt" and pop_always else "npa,hirshfeld") + " " + JOB[job]
     return r + " guess=mix" if bs else r
 
 

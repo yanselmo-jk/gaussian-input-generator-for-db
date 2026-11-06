@@ -31,9 +31,19 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 | info | `job`, `converged`, `normal_termination` | job 종류, 수렴 여부(opt 마지막 frame), 정상 종료 여부 |
 | info | `s2`, `s2_dev` | ⟨S²⟩, ⟨S²⟩ − S(S+1) |
 | info | `q_sum_ok`, `spin_sum_ok` | Mulliken charge 합 = 전체 전하 (±1e-3), spin 합 = mult − 1 (±0.05) |
+| charge | `hirshfeld_charges`, `cm5_charges` | e. `pop=hirshfeld` 출력. 출력이 없으면 NaN |
+| spin | `hirshfeld_spins` | Hirshfeld spin density. closed shell은 0 |
+| info | `dipole` | e·Å, (x, y, z). Gaussian "Dipole moment (field-independent basis)" (Debye) × 0.20819434 |
+| info | `quadrupole` | e·Å², traceless (XX, YY, ZZ, XY, XZ, YZ). Gaussian "Traceless Quadrupole moment" (Debye·Å) × 0.20819434 |
+| info | `homo_eV` | 가장 높은 점유 궤도 에너지 (α와 β 중 큰 값), eV |
+| info | `bs` | route에 `guess=mix`가 있으면 true (BS singlet) |
+| info | `sampler`, `composition`, `group` | `--registry`를 줄 때만. `group` = 조성. train/test를 group으로 나누면 같은 cluster·경로가 양쪽에 들어가지 않음 |
 
 - key 이름은 `6_build_charge-aware-mlip`과 같은 규칙을 따름.
-- `rmd parse`는 OMol25 Appendix A.1 기준으로 frame을 거름. 원자 하나의 force가 50 eV/Å를 넘거나 `s2_dev`가 1.1(Sc–Zn이 있으면 0.5)을 넘으면 extxyz에 쓰지 않고 개수만 출력함. 논문의 S² 기준은 이상값과의 차이로 해석했고(절대값이면 triplet이 모두 빠짐), Li/Na는 metal 기준에 넣지 않음. `--keep-all`이면 거르지 않음. registry status는 필터와 상관없이 log 단위로 정해짐.
+- `rmd parse`는 다음 frame을 extxyz에 쓰지 않고 개수만 출력함 (`--keep-all`이면 거르지 않음). registry status는 필터와 상관없이 log 단위로 정해짐.
+  - 원자 하나의 force가 50 eV/Å 초과 (OMol25 Appendix A.1).
+  - `s2_dev`가 BS singlet은 1.1, 그 밖의 open-shell은 0.25 초과 (Sc–Zn이 있으면 0.5와 비교해 작은 값). 1.1은 OMol25 기준을 이상값과의 차이로 읽은 값(절대값이면 triplet이 모두 빠짐)이고 BS singlet의 완전한 spin 분리(차이 약 1)를 허용함. 0.25는 우리 선택임 (예: doublet인데 ⟨S²⟩ 1.8이면 오염된 상태). Li/Na는 metal 기준에 넣지 않음.
+  - `homo_eV` > 0: 추가 전자가 결합하지 않고 diffuse basis 꼬리에 있음.
 - NBO spin은 NBO 출력의 alpha와 beta natural population 차이로 계산함.
 
 ## 확인 결과 (Hangang G16 c02, job 1212786, 2026-11-04, test_decks/ t1–t3)
@@ -45,3 +55,8 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 - 주의: def2-TZVPPD의 diffuse 함수 때문에 Mulliken/Loewdin 값이 basis에 따라 크게 바뀜.
   - 예: Li⁰·EC의 Mulliken spin이 Li 1.499 (NBO 0.926).
   - 예: Li+–EC의 Loewdin carbonyl O charge가 +0.09.
+
+## 확인 결과 (Hangang G16 c02, job 1224122, 2026-11-06)
+
+- `pop=(npa,hirshfeld)` 출력 형식: EC⁺ doublet sp, Li⁺–EC opt (`pop=(npa,hirshfeld,always)`에서 매 step 출력). fixture `tests/fixtures/h1_ec_cation_hirsh.log`.
+- 같은 job에서 `stable=opt` + Link1 force도 시험함: EC⁺ doublet은 stable. 안정성 검사 92 s(16 core) 대 sp + force 45 s. deck에는 넣지 않음.

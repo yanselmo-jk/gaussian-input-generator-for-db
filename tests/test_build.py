@@ -688,7 +688,7 @@ def test_per_combo_rng_isolated(tmp_path, monkeypatch):
         return fake
 
     cfg = {"seed": 0, "charge": {"range": [-2, 2]}}
-    scfg = {"n_distort": 2, "rattle_A": 0.1, "dilate": []}
+    scfg = {"n_distort": 2, "rattle_A": 0.1, "dilate": [], "m_stretch": []}
 
     def run(ok):
         with monkeypatch.context() as m:
@@ -711,3 +711,79 @@ def test_q_ok_li_dianion():
     ctx = types.SimpleNamespace(cat=species.catalog(), cfg={"charge": {"range": [-2, 2]}})
     assert not sample._q_ok(ctx, -2, ["Li", "PF6", "PF6"], -1)
     assert sample._q_ok(ctx, -1, ["Li", "PF6"], -1)
+
+
+def test_q_ok_multi_electron_reduction():
+    """A delta_q <= -2 reduction needs one Li/Na-bearing member per added electron."""
+    import types
+    from rmlipdata import sample
+    ctx = types.SimpleNamespace(cat=species.catalog(), cfg={"charge": {"range": [-2, 2]}})
+    two_li = ["Li", "Li", "EC", "EC"]
+    assert sample._q_ok(ctx, sample._formal(ctx, two_li) - 2, two_li, -2)
+    one_li = ["Li", "EC"]
+    assert not sample._q_ok(ctx, sample._formal(ctx, one_li) - 2, one_li, -2)
+    assert not sample._q_ok(ctx, sample._formal(ctx, ["EC", "EC"]) - 2, ["EC", "EC"], -2)
+    one_li2 = ["Li", "EC", "EC"]
+    assert sample._q_ok(ctx, sample._formal(ctx, one_li2) - 1, one_li2, -1)
+
+
+def test_cluster_m_stretch(monkeypatch):
+    """m_stretch moves each non-cation member outward by (factor-1) x its shortest cation distance."""
+    from types import SimpleNamespace
+    from rmlipdata import sample
+    pos = np.array([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [4.0, 0.0, 0.0]])
+    cl = {"symbols": ["Li", "C", "O"], "positions": pos,
+          "members": [("Li", [0]), ("EC", [1, 2])], "composition": "Li1 EC1"}
+    monkeypatch.setattr(sample, "_combos", lambda ctx: [("Li", "EC")])
+    monkeypatch.setattr(sample, "_cluster", lambda ctx, combo, dq: (0, cl))
+    ctx = SimpleNamespace(cfg={"seed": 0}, cat=species.catalog(), workdir=None, rng=np.random.default_rng(0))
+    recs = list(sample.cluster(ctx, {"n_distort": 0, "dilate": [], "m_stretch": [1.1]}, 0))
+    stretch = [r for r in recs if r["params"]["kind"] == "m_stretch"]
+    assert len(stretch) == 1
+    moved = stretch[0]["positions"]
+    assert np.isclose(np.linalg.norm(moved[1] - moved[0]), 3.3)     # 3.0 A x 1.1
+    assert np.allclose(np.linalg.norm(moved[1] - moved[2]), 1.0)    # the member stayed rigid
+
+
+def test_path_rattle_end_to_end(tmp_path):
+    """TINY bond_scan1 run: every second path frame is rattled and carries rattle_A."""
+    cfg = dict(TINY, out=str(tmp_path / "run"))
+    cfg["samplers"] = {name: dict(sc, on=name == "bond_scan1") for name, sc in TINY["samplers"].items()}
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    assert cli.main(["generate", str(path)]) == 0
+    con = registry.connect(tmp_path / "run" / "registry.sqlite")
+    params = [json.loads(r["params"]) for r in con.execute(
+        "SELECT params FROM structures WHERE sampler='bond_scan1'")]
+    con.close()
+    assert params
+    assert any(p.get("rattle_A") == 0.07 for p in params)
+    assert any("rattle_A" not in p for p in params)
+
+
+def test_atoms_sampler(tmp_path):
+    """Isolated atoms for every configured element, q -1..+1, no H+ and nothing outside delta_q 0."""
+    from types import SimpleNamespace
+    from rmlipdata import sample
+    cfg = {"seed": 0, "charge": {"range": [-2, 2]},
+           "species": {"cations": ["Li"], "anions": ["PF6"], "solvents": ["EC", "H2O"]}}
+    ctx = SimpleNamespace(cfg=cfg, cat=species.catalog(), workdir=tmp_path, rng=np.random.default_rng(0))
+    assert list(sample.atoms(ctx, {}, -1)) == []
+    recs = list(sample.atoms(ctx, {}, 0))
+    assert {"H", "C", "O", "Li", "P", "F"} <= {r["symbols"][0] for r in recs}
+    assert not [r for r in recs if r["symbols"] == ["H"] and r["charge"] == 1]
+    for r in recs:
+        assert r["composition"] == r["symbols"][0] and r["charge"] in (-1, 0, 1)
+        assert r["params"] == {"kind": "atom", "element": r["symbols"][0]}
+
+
+def test_h_transfer_ox(tmp_path):
+    """An oxidised [EC, EC] cluster gives an h_transfer_ox candidate; the neutral pair does not."""
+    import types
+    from rmlipdata import sample
+    cat = species.catalog()
+    combo = ["EC", "EC"]
+    cl = build.assemble(combo, cat, tmp_path, 1, np.random.default_rng(0))
+    ctx = types.SimpleNamespace(cat=cat, workdir=tmp_path, cfg={}, rng=np.random.default_rng(0))
+    assert any(c[0] == "h_transfer_ox" for c in sample._reaction_candidates(ctx, cl, combo, (), True))
+    assert not any(c[0] == "h_transfer_ox" for c in sample._reaction_candidates(ctx, cl, combo))

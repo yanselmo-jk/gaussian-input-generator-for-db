@@ -52,6 +52,12 @@ def _plan(cfg, cat, names):
         scfg = cfg["samplers"][name]
         if name == "monomer":
             plan[name] = len(sp)
+        elif name == "atoms":
+            dq0 = 0 in [int(q) for q in cfg.get("charge", {}).get("delta_q", [0])]
+            elems = {a.GetSymbol() for k in ("cations", "anions", "solvents")
+                     for n in cfg["species"].get(k, [])
+                     for a in Chem.AddHs(Chem.MolFromSmiles(cat[n].smiles)).GetAtoms()}
+            plan[name] = len(elems) if dq0 else 0  # the atoms sampler only runs the delta_q 0 stage
         elif name == "pair_scan":
             plan[name] = min(npairs, int(scfg.get("max_pairs", npairs)))
         elif name == "cluster_md":
@@ -223,7 +229,7 @@ def generate(cfg, only=None, dry=False):
 
         q0 = int(rec["charge"])
         n, base = emit(q0, rec["params"])
-        if (rec["job"] != "sp" or vertical <= 0.0 or rec["params"].get("kind") == "cation"
+        if (rec["job"] != "sp" or vertical <= 0.0 or rec["params"].get("kind") in ("cation", "atom")
                 or rec["params"].get("contact") == "rcov_sum"):
             return n  # vertical decks only for geometries that depend on charge
         u_v = int(hashlib.sha1(x + b"vert").hexdigest()[:8], 16) / 2 ** 32
@@ -379,6 +385,11 @@ def parse_cmd(paths, out, db=None, keep_all=False):
     for log in logs:
         steps = parse.parse_log(log)
         fr = [a for i, st in enumerate(steps) for a in parse.to_atoms(st, log.stem, i)]
+        row = con.execute("SELECT sampler, composition FROM structures WHERE id=?", (log.stem,)).fetchone() \
+            if con else None
+        for a in fr:  # group = composition: split train/test by group so no cluster or path is on both sides
+            if row:
+                a.info.update(sampler=row["sampler"], composition=row["composition"], group=row["composition"])
         ok = bool(fr) and bool(steps) and all(s["normal"] for s in steps)
         failed += 0 if ok else 1
         for a in fr:
@@ -398,8 +409,9 @@ def parse_cmd(paths, out, db=None, keep_all=False):
         con.close()
     print(f"{len(logs)} logs, {len(frames)} frames, {failed} failed")
     if +dropped:
-        print(f"dropped by OMol25 filters: {dropped['force']} with a force > {parse.MAX_FORCE:g} eV/A, "
-              f"{dropped['s2']} with <S2> - S(S+1) above {parse.MAX_S2_DEV:g} ({parse.MAX_S2_DEV_TM:g} with Sc-Zn)")
+        print(f"dropped by quality filters: {dropped['force']} with a force > {parse.MAX_FORCE:g} eV/A, "
+              f"{dropped['s2']} with <S2> - S(S+1) above {parse.MAX_S2_DEV_PURE:g} ({parse.MAX_S2_DEV:g} for BS "
+              f"singlets, {parse.MAX_S2_DEV_TM:g} with Sc-Zn), {dropped['homo']} with HOMO > 0 eV")
     return missing
 
 
