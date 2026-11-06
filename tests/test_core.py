@@ -148,3 +148,25 @@ def test_flag_paths_energy_and_spin(tmp_path):
     assert read(tmp_path / "p.extxyz", ":")[0].info["path_flag"] == "ok"
     assert path_key("hop", {"kind": "hop", "t": 0.5, "cation_index": 0, "from_donor": 1, "to_donor": 2})[1] == 0.5
     assert path_key("bond_scan1", {"bond": [0, 1], "index": 3, "vertical_dq": 1}) is None
+    assert path_key("bond_scan1", {"bond": [0, 1], "index": 3, "cfg_tag": "ab12cd34"}) == ("ab12cd34/bond:0-1", 3.0)
+
+
+def test_parse_dir_layout_id_from_title(tmp_path):
+    """<dir>/in.log from another machine: id comes from the deck title; unfinished logs leave the status alone."""
+    from rmlipdata import cli, registry
+    src = (FIX.parent / "t2_li_ec_q0_m2_sp.log").read_text()
+    sid = "monomer-0123456789ab"
+    done = src.replace(" t2 Li EC reduced doublet sp\n", f" {sid}\n", 1)
+    cut = done[:done.index("Normal termination")]
+    con = registry.connect(tmp_path / "registry.sqlite")
+    for i, st in ((sid, "submitted"), ("monomer-ffffffffffff", "submitted"), ("monomer-eeeeeeeeeeee", "submitted")):
+        con.execute("INSERT INTO structures (id, sampler, composition, status) VALUES (?, ?, ?, ?)", (i, "monomer", "Li1 EC1", st))
+    con.commit()
+    for d, text in ((sid, done), ("monomer-ffffffffffff", cut.replace(sid, "monomer-ffffffffffff")),
+                    ("monomer-eeeeeeeeeeee", cut.replace(sid, "monomer-eeeeeeeeeeee") + " Error termination via Lnk1e\n")):
+        (tmp_path / "back" / d).mkdir(parents=True)
+        (tmp_path / "back" / d / "in.log").write_text(text)
+    cli.parse_cmd([str(tmp_path / "back")], str(tmp_path / "d.extxyz"), db=str(tmp_path / "registry.sqlite"))
+    st = dict(con.execute("SELECT id, status FROM structures"))
+    assert st == {sid: "parsed", "monomer-ffffffffffff": "submitted", "monomer-eeeeeeeeeeee": "failed"}
+    assert read(tmp_path / "d.extxyz", ":")[0].info["id"] == sid

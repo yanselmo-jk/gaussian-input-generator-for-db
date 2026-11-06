@@ -353,14 +353,19 @@ def monomer(ctx, scfg, delta_q):
                 n += 1
 
 
+MADELUNG_L = (0, 0, 1, 0, 1, 0, 2, 1, 0, 2, 1, 0, 3, 2, 1, 0, 3, 2, 1)  # 1s 2s 2p 3s 3p 4s 3d 4p ... 7p
+
+
 def _hund_mult(n):
-    """Ground-state multiplicity of an atom or atomic ion with n electrons (n <= 18: H-Ar shells, Hund's rule)."""
-    core = 0 if n <= 2 else 2 if n <= 10 else 10
-    v = n - core
-    if core == 0:
-        return v % 2 + 1
-    p = max(v - 2, 0)
-    return (1 if v == 1 else min(p, 6 - p)) + 1
+    """Ground-state multiplicity of an atom or atomic ion with n electrons: Hund's rule on the last open subshell
+    in aufbau order. Right for main-group atoms (H-Ar, K, Ca, Ga-Kr, ...); None for an open d or f shell, where
+    aufbau exceptions (Cr, Cu) and the 4s/3d order of ions make the rule unreliable."""
+    for l in MADELUNG_L:
+        cap = 2 * (2 * l + 1)
+        if n <= cap:
+            return None if l >= 2 and 0 < n < cap else min(n, cap - n) + 1
+        n -= cap
+    return None
 
 
 def atoms(ctx, scfg, delta_q):
@@ -381,9 +386,12 @@ def atoms(ctx, scfg, delta_q):
                 continue  # H+ has no electrons
             if n >= _limit(scfg):
                 return
+            mult = _hund_mult(n_electrons([el], c))
+            if mult is None:
+                warnings.warn(f"atoms: {el} q={c} has an open d/f shell; ground-state multiplicity not set, skipped")
+                continue
             yield dict(symbols=[el], positions=np.zeros((1, 3)), charge=c, sampler="atoms",
-                       composition=el, job="sp", bs=False, params={"kind": "atom", "element": el},
-                       mults=[_hund_mult(n_electrons([el], c))])
+                       composition=el, job="sp", bs=False, params={"kind": "atom", "element": el}, mults=[mult])
             n += 1
 
 
@@ -1188,7 +1196,7 @@ def hop(ctx, scfg, delta_q):
             if len(targets) > max_per:
                 targets = [targets[i] for i in rng.permutation(len(targets))[:max_per]]
             for mem, name, idxs, d2 in targets:
-                prng = np.random.default_rng(int(rng.integers(2 ** 63)))  # drawn before xtb: a failure must not shift later noise
+                pseed = int(rng.integers(2 ** 63))  # drawn before xtb; noise per path point: failures shift nothing
                 mol = mols[mem][1]
                 local = idxs.index(d2)
                 nb = [idxs[a.GetIdx()] for a in mol.GetAtomWithIdx(local).GetNeighbors()]
@@ -1217,8 +1225,7 @@ def hop(ctx, scfg, delta_q):
                 def ok_at(y, m=m, rest=rest, rcov=rcov):
                     return not (np.linalg.norm(y[rest] - y[m], axis=1) < 0.75 * (rcov[m] + rcov[rest])).any()
 
-                e = 0  # emission index within this path: odd frames carry thermal noise
-                for t in np.linspace(0.0, 1.0, npts)[1:]:  # t=0 is the relaxed cluster (its opt deck)
+                for kt, t in enumerate(np.linspace(0.0, 1.0, npts)[1:], 1):  # t=0 is the relaxed cluster (its opt deck)
                     if n >= _limit(scfg):
                         return
                     pt = (1 - t) * p1 + t * p2
@@ -1242,7 +1249,7 @@ def hop(ctx, scfg, delta_q):
                         continue  # e.g. mirror image across the reference plane: not on the intended path
                     if not ok_at(cur):
                         continue  # cation runs into an atom: no useful PES point
-                    rr = _rattled(cur, sigma, prng, ok_at) if e % 2 else None
+                    rr = _rattled(cur, sigma, np.random.default_rng([pseed, kt]), ok_at) if kt % 2 == 0 else None
                     yield _rec(ctx, symbols, cur if rr is None else rr, q, "hop", combo, "sp", False,
                                {"kind": "hop", "cation": cation, "cation_index": int(m), "from_donor": d1,
                                 "to_donor": int(d2), "t": float(t),
@@ -1250,7 +1257,6 @@ def hop(ctx, scfg, delta_q):
                                 "d_to_A": float(np.linalg.norm(cur[m] - cur[d2])),
                                 "path_dev_A": dev, "ref3": r3}
                                | ({"rattle_A": sigma} if rr is not None else {}) | _etemp(cl, r))
-                    e += 1
                     n += 1
         if bool(scfg.get("exchange", True)):
             emax = int(scfg.get("exchange_max_per_cluster", 2))

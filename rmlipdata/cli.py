@@ -138,6 +138,15 @@ def generate(cfg, only=None, dry=False):
     qlo, qhi = cfg.get("charge", {}).get("range", (-2, 2))
     added = {n: 0 for n in names}
     hsfrac = {n: float(cfg["samplers"][n].get("high_spin_fraction", high_spin)) for n in names}
+    # settings that shape the geometries: paths from another seed or n_points in the same out dir stay apart in
+    # rmd parse (path_key); high_spin_fraction only picks multiplicities
+    def canon(x):  # str keys: YAML reads 'on' as True, and int keys (max_components) cannot be sorted with str
+        return {str(k): canon(v) for k, v in x.items()} if isinstance(x, dict) else \
+            [canon(v) for v in x] if isinstance(x, (list, tuple)) else x
+
+    tags = {n: hashlib.sha1(json.dumps(canon([cfg.get("seed", 0), cfg.get("species"), cfg.get("cluster"),
+                                              {k: v for k, v in cfg["samplers"][n].items() if k != "high_spin_fraction"}]),
+                                       sort_keys=True, default=str).encode()).hexdigest()[:8] for n in names}
     dedup_dropped, seen = Counter(), {}
 
     dq_list = cfg.get("charge", {}).get("delta_q", [0])
@@ -181,6 +190,7 @@ def generate(cfg, only=None, dry=False):
         sys.stderr.flush()
 
     def add(name, rec, dq, hsfrac):
+        rec = dict(rec, params=dict(rec.get("params") or {}, cfg_tag=tags[name]))
         x = registry.make_id(rec["sampler"], rec["symbols"], rec["positions"], rec["charge"], 0, False,
                              rec["job"]).encode()
         if dedup:
@@ -199,10 +209,12 @@ def generate(cfg, only=None, dry=False):
 
         def emit(q, params, parent=None):
             n, low_sid = 0, None
-            states = g16.spin_states(rec["symbols"], q, offsets=offsets, bs=rec["bs"])
+            fixed = rec.get("mults") is not None  # the sampler fixed the multiplicity (atom ground states)
+            states = g16.spin_states(rec["symbols"], q, offsets=tuple(range(0, 20, 2)) if fixed else offsets,
+                                     bs=rec["bs"])
             low = min((mult for mult, _ in states), default=0)
             for mult, bs in states:
-                if rec.get("mults") is not None:  # the sampler fixed the multiplicity (atom ground states)
+                if fixed:
                     if mult not in rec["mults"]:
                         continue
                 elif mult > low and not bs and u_hs >= hsfrac:
@@ -382,19 +394,25 @@ def resources_cmd(db, nproc=None, mem=None, samplers=None):
 def parse_cmd(paths, out, db=None, keep_all=False):
     logs = []
     for p in map(Path, paths):
-        logs += (sorted(p.glob("*.log")) + sorted(p.glob("*.out"))) if p.is_dir() else [p]
+        logs += (sorted(p.rglob("*.log")) + sorted(p.rglob("*.out"))) if p.is_dir() else [p]
+    logs = list(dict.fromkeys(logs))
     from collections import Counter
-    frames, failed, missing, dropped = [], 0, 0, Counter()
+    frames, failed, missing, incomplete, dropped = [], 0, 0, 0, Counter()
     con = registry.connect(db) if db else None
     for log in logs:
         steps = parse.parse_log(log)
-        fr = [a for i, st in enumerate(steps) for a in parse.to_atoms(st, log.stem, i)]
-        row = con.execute("SELECT sampler, composition, params FROM structures WHERE id=?", (log.stem,)).fetchone() \
+        normal = bool(steps) and all(s["normal"] for s in steps)
+        if not normal and not any(s["error"] for s in steps):
+            incomplete += 1  # still running or killed: no frames, registry status unchanged
+            continue
+        sid = parse.log_id(log, steps)  # deck title = registry id, whatever the file is called
+        fr = [a for i, st in enumerate(steps) for a in parse.to_atoms(st, sid, i)]
+        row = con.execute("SELECT sampler, composition, params FROM structures WHERE id=?", (sid,)).fetchone() \
             if con else None
         try:
             prm = json.loads(row["params"] or "{}") if row else {}
         except ValueError:
-            print(f"warning: {log.stem}: unreadable registry params; no path information", file=sys.stderr)
+            print(f"warning: {sid}: unreadable registry params; no path information", file=sys.stderr)
             prm = {}
         pk = parse.path_key(row["sampler"], prm) if row else None
         for a in fr:  # group = composition: split train/test by group so no cluster or path is on both sides
@@ -402,11 +420,11 @@ def parse_cmd(paths, out, db=None, keep_all=False):
                 a.info.update(sampler=row["sampler"], composition=row["composition"], group=row["composition"])
             if pk and a.info.get("job") == "sp":
                 a.info.update(path=pk[0], path_pos=pk[1], rattled="rattle_A" in prm)
-        ok = bool(fr) and bool(steps) and all(s["normal"] for s in steps)
+        ok = normal and bool(fr)
         failed += 0 if ok else 1
         frames += fr
-        if con and not registry.set_status(con, log.stem, "parsed" if ok else "failed", log):
-            print(f"warning: {log.stem} is not in the registry", file=sys.stderr)
+        if con and not registry.set_status(con, sid, "parsed" if ok else "failed", log):
+            print(f"warning: {sid} is not in the registry", file=sys.stderr)
             missing += 1
     n_bad = parse.flag_paths(frames)  # before filtering: neighbours are the generated path, not the survivors
     kept = []
@@ -423,7 +441,8 @@ def parse_cmd(paths, out, db=None, keep_all=False):
     if con:
         con.commit()
         con.close()
-    print(f"{len(logs)} logs, {len(frames)} frames, {failed} failed")
+    print(f"{len(logs)} logs, {len(frames)} frames, {failed} failed"
+          + (f", {incomplete} without a termination line skipped (running or killed)" if incomplete else ""))
     if n_bad:
         print(f"path check: {n_bad} neighbour pairs marked (info path_flag): energy change differs from the force "
               f"work by > {parse.PATH_JUMP_EV:g} eV (unrattled, step < {parse.PATH_MAX_STEP_A:g} A), or an NPA "

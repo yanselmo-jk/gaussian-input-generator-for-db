@@ -28,6 +28,8 @@ FORCES = re.compile(r"Forces \(Hartrees/Bohr\)\n[^\n]*\n[^\n]*-{5,}\n(.*?)\n\s*-
 S2 = re.compile(rf"S\*\*2 before annihilation\s+({NUM})")
 CHMULT = re.compile(r"Charge\s*=\s*(-?\d+)\s+Multiplicity\s*=\s*(\d+)")
 ROUTE = re.compile(r"\n -{10,}\n( #.*?)\n -{10,}\n", re.S)
+TITLE = re.compile(r"\n -+\n (.+)\n -+\n Symbolic Z-matrix:")
+ID_RE = re.compile(r"[A-Za-z0-9_]+-[0-9a-f]{12}")  # registry id: <sampler>-sha1[:12]
 ROW = re.compile(rf"^\s*\d+\s+[A-Z][a-z]?\s+({NUM})(?:\s+({NUM}))?\s*$")
 MULLIKEN = re.compile(r"^ Mulliken charges( and spin densities)?:\s*$", re.M)
 # header confirmed on G16 c02 (Hangang 2026-11-04): open shell prints charges only, no Lowdin spin
@@ -171,7 +173,9 @@ def parse_step(text):
         fr["forces"] = np.array([[float(x) for x in l.split()[2:5]] for l in f[1].splitlines()]) * HA_EV / BOHR_A
         fr["s2"] = float(s2[-1]) if s2 else None
         frames.append(fr)
-    return {"route": route, "charge": charge, "mult": mult, "normal": "Normal termination of Gaussian" in text,
+    t = TITLE.search(text)
+    return {"route": route, "title": t[1].strip() if t else "", "error": "Error termination" in text,
+            "charge": charge, "mult": mult, "normal": "Normal termination of Gaussian" in text,
             "stationary": "Stationary point found" in text, "frames": frames}
 
 
@@ -267,6 +271,11 @@ def path_key(sampler, params):
     p = params or {}
     if "vertical_dq" in p or "peak_rattle" in p:
         return None  # vertical charge decks and rattled peak copies branch off the path
+    k = _path_key(sampler, p)
+    return k and (f"{p['cfg_tag']}/{k[0]}" if "cfg_tag" in p else k[0], k[1])  # cfg_tag: generate settings
+
+
+def _path_key(sampler, p):
     if sampler in ("bond_scan1", "bond_scan2") and "bond" in p:
         return f"bond:{p['bond'][0]}-{p['bond'][1]}", float(p.get("index", 0))
     if sampler in ("reaction", "reaction2") and "template" in p:
@@ -311,7 +320,14 @@ def flag_paths(frames):
     return n
 
 
+def log_id(path, steps):
+    """Registry id: the deck title (rmd writes the id there), so any file or directory name works; else the stem."""
+    t = steps[0]["title"] if steps else ""
+    return t if ID_RE.fullmatch(t) else Path(path).stem
+
+
 def log_atoms(path):
-    """All frames of a log; id = file stem (= registry id)."""
-    sid = Path(path).stem
-    return [a for i, st in enumerate(parse_log(path)) for a in to_atoms(st, sid, i)]
+    """All frames of a log; id from log_id."""
+    steps = parse_log(path)
+    sid = log_id(path, steps)
+    return [a for i, st in enumerate(steps) for a in to_atoms(st, sid, i)]

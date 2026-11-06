@@ -147,4 +147,4 @@ def test_stage_record_wins_over_vertical(tmp_path, monkeypatch):
     recs = [_rec(["Li", "F"], li_f, 0, params={"src": "a"}), _rec(["Li", "F"], li_f, 1, params={"src": "b"})]
     con, _ = _run(tmp_path, monkeypatch, recs, vertical_fraction=1.0)
     row = con.execute("SELECT parent_id, params FROM structures WHERE charge=1").fetchone()
-    assert row[0] is None and json.loads(row[1]) == {"src": "b"}
+    assert row[0] is None and json.loads(row[1])["src"] == "b" and "vertical_dq" not in json.loads(row[1])

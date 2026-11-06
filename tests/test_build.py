@@ -797,3 +797,16 @@ def test_hund_mult_atoms():
             ("N", 0): 4, ("N", 1): 3, ("O", 0): 3, ("O", 1): 4, ("O", -1): 2, ("F", 0): 2, ("F", -1): 1,
             ("Na", 0): 2, ("P", 0): 4, ("S", 0): 3, ("Cl", 0): 2, ("Cl", -1): 1}
     assert {k: _hund_mult(n_electrons([k[0]], k[1])) for k in want} == want
+    assert [_hund_mult(n) for n in (19, 20, 35, 36, 26, 30)] == [2, 1, 2, 1, None, 1]  # K Ca Br Kr; Fe open 3d; Zn
+
+
+def test_atoms_ignore_mult_offsets(tmp_path):
+    """Atom ground states are written even when charge.mult_offsets excludes them (C triplet with [0])."""
+    import sqlite3
+    from rmlipdata import cli
+    cfg = {"out": str(tmp_path / "run"), "seed": 0, "species": {"solvents": ["EC"]},
+           "charge": {"delta_q": [0], "mult_offsets": [0]}, "samplers": {"atoms": {"on": True}}}
+    cli.generate(cfg, only=["atoms"])
+    rows = dict(((c, q), m) for c, q, m in sqlite3.connect(tmp_path / "run" / "registry.sqlite").execute(
+        "SELECT composition, charge, mult FROM structures"))
+    assert rows[("C", 0)] == 3 and rows[("O", 0)] == 3 and rows[("O", 1)] == 4 and len(rows) == 8

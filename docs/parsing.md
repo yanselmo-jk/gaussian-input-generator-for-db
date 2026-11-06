@@ -4,9 +4,12 @@
 rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 ```
 
-- PATH에는 log 파일이나 폴더를 줌. 폴더면 안의 `*.log`, `*.out`을 모두 읽음.
-- `--registry`를 주면 각 log의 status를 바꿈. log 파일명(= id)으로 행을 찾음.
-  - 모든 job step이 정상 종료되고 frame이 있으면 `parsed`, 아니면 `failed`.
+- PATH에는 log 파일이나 폴더를 줌. 폴더면 하위 폴더까지 `*.log`, `*.out`을 모두 읽음.
+- id는 log에 다시 적힌 deck title에서 읽음 (`rmd generate`가 title에 registry id를 씀). 그래서 파일·폴더 이름은 자유로움 (예: `<id>/in.log`). title이 id 형식(`<sampler>-<12자리 hex>`)이 아니면 파일 이름에서 확장자를 뺀 부분을 씀.
+- `--registry`를 주면 각 log의 status를 바꿈.
+  - 모든 job step이 정상 종료되고 frame이 있으면 `parsed`.
+  - `Error termination`이 있으면 `failed` (frame은 씀).
+  - 둘 다 없으면 (계산 중, walltime 초과로 끊김) frame을 쓰지 않고 status를 바꾸지 않음. 개수만 출력함. 끊긴 job은 `rmd list`(status `submitted`)로 찾아 다시 계산함.
 - 순서: extxyz를 임시 파일에 다 쓰고 교체한 다음 registry 변경을 확정함. 그래서 저장에 실패하면 registry가 바뀌지 않음.
 
 ## Frame을 나누는 규칙
@@ -73,3 +76,10 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 
 - `pop=(npa,hirshfeld)` 출력 형식: EC⁺ doublet sp, Li⁺–EC opt (`pop=(npa,hirshfeld,always)`에서 매 step 출력). fixture `tests/fixtures/h1_ec_cation_hirsh.log`.
 - 같은 job에서 `stable=opt` + Link1 force도 시험함: EC⁺ doublet은 stable. 안정성 검사 92 s(16 core) 대 sp + force 45 s. deck에는 넣지 않음.
+
+## 다른 machine에서 계산할 때
+
+1. 생성 machine: `rmd generate`, 필요하면 `rmd resources`, 그다음 `rmd submit manifest.csv`.
+2. deck을 원하는 구조로 복사함 (예: `<id>/in.gjf`). deck 안의 title이 id라 이름을 바꿔도 됨.
+3. 계산 machine: 폴더마다 `g16 in.gjf`.
+4. 결과 폴더를 생성 machine으로 가져와 `rmd parse back/ -o data.extxyz --registry runs/x/registry.sqlite`. 계산 중인 job이 섞여 있어도 됨. 다시 parse하면 끝난 job이 추가됨 (extxyz는 매번 새로 씀).
