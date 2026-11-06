@@ -787,3 +787,13 @@ def test_h_transfer_ox(tmp_path):
     ctx = types.SimpleNamespace(cat=cat, workdir=tmp_path, cfg={}, rng=np.random.default_rng(0))
     assert any(c[0] == "h_transfer_ox" for c in sample._reaction_candidates(ctx, cl, combo, (), True))
     assert not any(c[0] == "h_transfer_ox" for c in sample._reaction_candidates(ctx, cl, combo))
+
+
+def test_hund_mult_atoms():
+    """Atom reference decks get only the Hund ground-state multiplicity."""
+    from rmlipdata.sample import _hund_mult
+    from rmlipdata.g16 import n_electrons
+    want = {("H", 0): 2, ("H", -1): 1, ("Li", 0): 2, ("Li", 1): 1, ("B", 0): 2, ("C", 0): 3, ("C", -1): 4,
+            ("N", 0): 4, ("N", 1): 3, ("O", 0): 3, ("O", 1): 4, ("O", -1): 2, ("F", 0): 2, ("F", -1): 1,
+            ("Na", 0): 2, ("P", 0): 4, ("S", 0): 3, ("Cl", 0): 2, ("Cl", -1): 1}
+    assert {k: _hund_mult(n_electrons([k[0]], k[1])) for k in want} == want

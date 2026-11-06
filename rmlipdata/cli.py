@@ -56,7 +56,8 @@ def _plan(cfg, cat, names):
             dq0 = 0 in [int(q) for q in cfg.get("charge", {}).get("delta_q", [0])]
             elems = {a.GetSymbol() for k in ("cations", "anions", "solvents")
                      for n in cfg["species"].get(k, [])
-                     for a in Chem.AddHs(Chem.MolFromSmiles(cat[n].smiles)).GetAtoms()}
+                     for m in [Chem.MolFromSmiles(cat[n].smiles or "")] if m is not None
+                     for a in Chem.AddHs(m).GetAtoms()}
             plan[name] = len(elems) if dq0 else 0  # the atoms sampler only runs the delta_q 0 stage
         elif name == "pair_scan":
             plan[name] = min(npairs, int(scfg.get("max_pairs", npairs)))
@@ -201,7 +202,10 @@ def generate(cfg, only=None, dry=False):
             states = g16.spin_states(rec["symbols"], q, offsets=offsets, bs=rec["bs"])
             low = min((mult for mult, _ in states), default=0)
             for mult, bs in states:
-                if mult > low and not bs and u_hs >= hsfrac:
+                if rec.get("mults") is not None:  # the sampler fixed the multiplicity (atom ground states)
+                    if mult not in rec["mults"]:
+                        continue
+                elif mult > low and not bs and u_hs >= hsfrac:
                     continue
                 row = dict(rec, charge=q, mult=mult, bs=bs, params=params, parent_id=parent,
                            formula=Atoms(symbols=rec["symbols"]).get_chemical_formula())
@@ -387,7 +391,11 @@ def parse_cmd(paths, out, db=None, keep_all=False):
         fr = [a for i, st in enumerate(steps) for a in parse.to_atoms(st, log.stem, i)]
         row = con.execute("SELECT sampler, composition, params FROM structures WHERE id=?", (log.stem,)).fetchone() \
             if con else None
-        prm = json.loads(row["params"] or "{}") if row else {}
+        try:
+            prm = json.loads(row["params"] or "{}") if row else {}
+        except ValueError:
+            print(f"warning: {log.stem}: unreadable registry params; no path information", file=sys.stderr)
+            prm = {}
         pk = parse.path_key(row["sampler"], prm) if row else None
         for a in fr:  # group = composition: split train/test by group so no cluster or path is on both sides
             if row:
@@ -396,15 +404,18 @@ def parse_cmd(paths, out, db=None, keep_all=False):
                 a.info.update(path=pk[0], path_pos=pk[1], rattled="rattle_A" in prm)
         ok = bool(fr) and bool(steps) and all(s["normal"] for s in steps)
         failed += 0 if ok else 1
-        for a in fr:
-            why = "" if keep_all else parse.reject(a)
-            dropped[why] += bool(why)
-            if not why:
-                frames.append(a)
+        frames += fr
         if con and not registry.set_status(con, log.stem, "parsed" if ok else "failed", log):
             print(f"warning: {log.stem} is not in the registry", file=sys.stderr)
             missing += 1
-    n_bad = parse.flag_paths(frames)
+    n_bad = parse.flag_paths(frames)  # before filtering: neighbours are the generated path, not the survivors
+    kept = []
+    for a in frames:
+        why = "" if keep_all else parse.reject(a)
+        dropped[why] += bool(why)
+        if not why:
+            kept.append(a)
+    frames = kept
     if frames:  # write first: a failed write must not leave 'parsed' rows without data
         tmp = Path(f"{out}.tmp")
         ase_write(tmp, frames, format="extxyz")

@@ -353,6 +353,16 @@ def monomer(ctx, scfg, delta_q):
                 n += 1
 
 
+def _hund_mult(n):
+    """Ground-state multiplicity of an atom or atomic ion with n electrons (n <= 18: H-Ar shells, Hund's rule)."""
+    core = 0 if n <= 2 else 2 if n <= 10 else 10
+    v = n - core
+    if core == 0:
+        return v % 2 + 1
+    p = max(v - 2, 0)
+    return (1 if v == 1 else min(p, 6 - p)) + 1
+
+
 def atoms(ctx, scfg, delta_q):
     """Isolated-atom reference decks (delta_q 0 only): every element in the configured species, q = -1..+1."""
     if int(delta_q) != 0:
@@ -372,7 +382,8 @@ def atoms(ctx, scfg, delta_q):
             if n >= _limit(scfg):
                 return
             yield dict(symbols=[el], positions=np.zeros((1, 3)), charge=c, sampler="atoms",
-                       composition=el, job="sp", bs=False, params={"kind": "atom", "element": el})
+                       composition=el, job="sp", bs=False, params={"kind": "atom", "element": el},
+                       mults=[_hund_mult(n_electrons([el], c))])
             n += 1
 
 
@@ -600,6 +611,7 @@ def bond_scan1(ctx, scfg, delta_q):
         rng = _stream(ctx, "bond_scan1", combo, q)
         symbols, pos = cl["symbols"], cl["positions"]
         for i, j, _, _ in _bond_candidates(ctx, cl, combo, max_bonds, rng):
+            prng = np.random.default_rng(int(rng.integers(2 ** 63)))  # drawn before xtb: a failure must not shift later noise
             r0 = float(np.linalg.norm(pos[i] - pos[j]))
             r1 = 1.05 * (_cov(symbols, i) + _cov(symbols, j)) + 1.5
             r = xtb.run_xtb(symbols, pos, q, _uhf(symbols, q), ctx.workdir, mode="sp",
@@ -612,7 +624,7 @@ def bond_scan1(ctx, scfg, delta_q):
                 if n >= _limit(scfg):
                     return
                 frame = np.asarray(frame, float)
-                rr = _rattled(frame, sigma, rng) if k % 2 else None
+                rr = _rattled(frame, sigma, prng) if k % 2 else None
                 yield _rec(ctx, symbols, frame if rr is None else rr, q, "bond_scan1", combo, "sp", bs,
                            {"bond": [i, j], "elements": [symbols[i], symbols[j]],
                             "r_A": float(np.linalg.norm(frame[i] - frame[j])), "index": k,
@@ -666,6 +678,7 @@ def bond_scan2(ctx, scfg, delta_q):
         rcov = np.array([_cov(symbols, k) for k in range(len(symbols))])
         bonds = _bonds(symbols, pos)
         for i, j, mol, idxs in _bond_candidates(ctx, cl, combo, max_bonds, rng):
+            prng = np.random.default_rng(int(rng.integers(2 ** 63)))  # drawn before xtb: a failure must not shift later noise
             li, lj = idxs.index(i), idxs.index(j)
             key = (min(i, j), max(i, j))
             side = [idxs[k] for k in _side(mol, li, lj)]
@@ -712,7 +725,7 @@ def bond_scan2(ctx, scfg, delta_q):
                 x = im.get_positions()
                 if not ok_at(x):
                     continue
-                rr = _rattled(x, sigma, rng, ok_at) if e % 2 else None
+                rr = _rattled(x, sigma, prng, ok_at) if e % 2 else None
                 yield _rec(ctx, symbols, x if rr is None else rr, q, "bond_scan2", combo, "sp", bs,
                            {"bond": [i, j], "elements": [symbols[i], symbols[j]], "method": "idpp",
                             "r_A": float(np.linalg.norm(x[i] - x[j])), "index": k,
@@ -735,7 +748,7 @@ def bond_scan2(ctx, scfg, delta_q):
                     x[side] += (dist - d_end) * vec / d_end  # j-side fragment moved rigidly along i->j
                     if not ok_far(x):
                         continue
-                    rr = _rattled(x, sigma, rng, ok_far) if e % 2 else None
+                    rr = _rattled(x, sigma, prng, ok_far) if e % 2 else None
                     yield _rec(ctx, symbols, x if rr is None else rr, q, "bond_scan2", combo, "sp", bs,
                                {"bond": [i, j], "elements": [symbols[i], symbols[j]], "method": "far",
                                 "r_A": float(np.linalg.norm(x[i] - x[j])), "index": k,
@@ -994,6 +1007,7 @@ def reaction(ctx, scfg, delta_q):
         cand = [c for c in _reaction_candidates(ctx, cl, combo, extra, int(delta_q) > 0) if c[0] in templates]
         cand = _pick(cand, max_per, rng)
         for template, pairs, ranges in cand:
+            prng = np.random.default_rng(int(rng.integers(2 ** 63)))  # drawn before xtb: a failure must not shift later noise
             if n >= _limit(scfg):
                 return
             atoms = list(dict.fromkeys(i for p in pairs for i in p))
@@ -1012,7 +1026,7 @@ def reaction(ctx, scfg, delta_q):
                 if n >= _limit(scfg):
                     return
                 x = np.asarray(r["frames"][k], float)
-                rr = _rattled(x, sigma, rng) if e % 2 else None
+                rr = _rattled(x, sigma, prng) if e % 2 and k not in (p, len(E) - 1) else None  # exact peak and end
                 yield _rec(ctx, cl["symbols"], x if rr is None else rr, q, "reaction", combo, "sp", bs,
                            {"template": template, "atoms": atoms, "pairs": [list(pr) for pr in pairs],
                             "ranges": [list(rg) for rg in ranges],
@@ -1025,7 +1039,7 @@ def reaction(ctx, scfg, delta_q):
             for j in range(peak_n if sigma > 0 else 0):
                 if n >= _limit(scfg):
                     return
-                rr = _rattle(peak, sigma, rng)
+                rr = _rattle(peak, sigma, prng)
                 if rr is None:
                     continue
                 yield _rec(ctx, cl["symbols"], rr, q, "reaction", combo, "sp", bs,
@@ -1090,6 +1104,7 @@ def reaction2(ctx, scfg, delta_q):
         cand = [c for c in _reaction_candidates(ctx, cl, combo, extra, int(delta_q) > 0) if c[0] in templates]
         cand = _pick(cand, max_per, rng)
         for template, pairs, ranges in cand:
+            prng = np.random.default_rng(int(rng.integers(2 ** 63)))  # drawn before xtb: a failure must not shift later noise
             if n >= _limit(scfg):
                 return
             atoms = list(dict.fromkeys(i for p in pairs for i in p))
@@ -1130,7 +1145,7 @@ def reaction2(ctx, scfg, delta_q):
                 x = im.get_positions()
                 if not ok_at(x):
                     continue
-                rr = _rattled(x, sigma, rng, ok_at) if e % 2 else None
+                rr = _rattled(x, sigma, prng, ok_at) if e % 2 else None
                 yield _rec(ctx, symbols, x if rr is None else rr, q, "reaction2", combo, "sp", bs,
                            {"template": template, "atoms": atoms, "pairs": [list(p) for p in pairs],
                             "index": k, "endpoint": endpoint, "charge_radicals": list(extra),
@@ -1173,6 +1188,7 @@ def hop(ctx, scfg, delta_q):
             if len(targets) > max_per:
                 targets = [targets[i] for i in rng.permutation(len(targets))[:max_per]]
             for mem, name, idxs, d2 in targets:
+                prng = np.random.default_rng(int(rng.integers(2 ** 63)))  # drawn before xtb: a failure must not shift later noise
                 mol = mols[mem][1]
                 local = idxs.index(d2)
                 nb = [idxs[a.GetIdx()] for a in mol.GetAtomWithIdx(local).GetNeighbors()]
@@ -1226,7 +1242,7 @@ def hop(ctx, scfg, delta_q):
                         continue  # e.g. mirror image across the reference plane: not on the intended path
                     if not ok_at(cur):
                         continue  # cation runs into an atom: no useful PES point
-                    rr = _rattled(cur, sigma, rng, ok_at) if e % 2 else None
+                    rr = _rattled(cur, sigma, prng, ok_at) if e % 2 else None
                     yield _rec(ctx, symbols, cur if rr is None else rr, q, "hop", combo, "sp", False,
                                {"kind": "hop", "cation": cation, "cation_index": int(m), "from_donor": d1,
                                 "to_donor": int(d2), "t": float(t),
@@ -1245,6 +1261,7 @@ def hop(ctx, scfg, delta_q):
             if len(pairs) > emax:
                 pairs = [pairs[i] for i in rng.permutation(len(pairs))[:emax]]
             for m, d in pairs:
+                prng = np.random.default_rng(int(rng.integers(2 ** 63)))  # drawn before xtb: a failure must not shift later noise
                 if n >= _limit(scfg):
                     return
                 r0 = float(np.linalg.norm(pos[m] - pos[d]))
@@ -1269,7 +1286,7 @@ def hop(ctx, scfg, delta_q):
                     frame = np.asarray(frame, float)
                     if not ok_at(frame):
                         continue  # cation runs into an atom, as in the hop guard
-                    rr = _rattled(frame, sigma, rng, ok_at) if e % 2 else None
+                    rr = _rattled(frame, sigma, prng, ok_at) if e % 2 else None
                     yield _rec(ctx, symbols, frame if rr is None else rr, q, "hop", combo, "sp", False,
                                {"kind": "exchange_out", "cation_index": int(m), "donor": int(d),
                                 "r_A": float(np.linalg.norm(frame[m] - frame[d])), "index": k,

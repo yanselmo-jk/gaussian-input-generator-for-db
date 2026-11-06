@@ -202,8 +202,10 @@ def to_atoms(step, sid, step_idx):
                        s2_dev=np.nan if fr["s2"] is None else fr["s2"] - S * (S + 1),
                        bs=bool(re.search(r"guess=mix", step["route"], re.I)),
                        homo_eV=np.nan if fr["homo"] is None else fr["homo"],
-                       dipole=np.full(3, np.nan) if fr["dipole"] is None else fr["dipole"],
-                       quadrupole=np.full(6, np.nan) if fr["quadrupole"] is None else fr["quadrupole"])
+                       dipole_eA=np.full(3, np.nan) if fr["dipole"] is None else fr["dipole"],
+                       quadrupole_eA2=np.full(6, np.nan) if fr["quadrupole"] is None else fr["quadrupole"])
+        # 'dipole' would be moved into calc.results by ase's extxyz reader; with nosymm the moments of charged
+        # frames refer to the input origin, so they change if the coordinates are translated
         mq = fr["mulliken"]
         if mq:
             at.info["q_sum_ok"] = bool(abs(mq[0].sum() - step["charge"]) < 1e-3)
@@ -216,14 +218,17 @@ def to_atoms(step, sid, step_idx):
 
 # OMol25 Appendix A.1 quality filters (arXiv 2505.08762). Their "S2 < 0.5 / < 1.1" is read as the deviation
 # <S2> - S(S+1): an absolute bound would drop every triplet. "Metal-containing" is read as transition metal;
-# the def2-TZVPPD file here covers H-Kr, so that means Sc-Zn. The 1.1 bound is kept for broken-symmetry
-# singlets (full unpairing gives a deviation of ~1); other open-shell decks use a tighter 0.25 (our choice:
-# e.g. a doublet with <S2> 1.8 is a contaminated state, not a label). A positive HOMO means the extra electron
-# is unbound (it sits in the diffuse basis tail).
+# the def2-TZVPPD file here covers H-Kr, so that means Sc-Zn. The 1.1 bound (OMol25: "to allow the full
+# spin-unpairing that may occur in organic reactivity") is kept for broken-symmetry singlets and for frames of
+# reactive samplers or of unknown origin (no registry): a doublet whose bond homolyses next to the radical
+# legitimately rises toward <S2> 1.75. Near-equilibrium samplers use a tighter 0.25 (our choice: there a
+# doublet with <S2> 1.8 is a contaminated state, not a label). A positive HOMO means the extra electron is
+# unbound (it sits in the diffuse basis tail).
 MAX_FORCE = 50.0      # eV/A, largest per-atom force
 MAX_S2_DEV = 1.1      # broken-symmetry singlets
 MAX_S2_DEV_PURE = 0.25
 MAX_S2_DEV_TM = 0.5
+EQUILIBRIUM_SAMPLERS = ("monomer", "atoms", "pair_scan", "cluster", "cluster_md")
 
 
 def reject(at):
@@ -231,7 +236,8 @@ def reject(at):
     if np.linalg.norm(at.get_forces(), axis=1).max() > MAX_FORCE:
         return "force"
     d = at.info.get("s2_dev", np.nan)
-    bound = MAX_S2_DEV if at.info.get("bs") else MAX_S2_DEV_PURE
+    pure = not at.info.get("bs") and at.info.get("sampler") in EQUILIBRIUM_SAMPLERS
+    bound = MAX_S2_DEV_PURE if pure else MAX_S2_DEV
     if any(21 <= z <= 30 for z in at.numbers):
         bound = min(bound, MAX_S2_DEV_TM)
     if np.isfinite(d) and d > bound:
@@ -284,22 +290,25 @@ def flag_paths(frames):
     n = 0
     for g in groups.values():
         g.sort(key=lambda a: a.info["path_pos"])
-        for a, b in zip(g, g[1:]):
+        exact = [a for a in g if not a.info.get("rattled")]  # rattled frames sit between two exact ones
+        pairs = [(a, b, "spin") for a, b in zip(g, g[1:])] + [(a, b, "energy") for a, b in zip(exact, exact[1:])]
+        for a, b, test in pairs:
             if a.get_chemical_symbols() != b.get_chemical_symbols():
                 continue
-            bad = set()
-            de = b.get_potential_energy() - a.get_potential_energy()
-            pred = -0.5 * float(((a.get_forces() + b.get_forces()) * (b.positions - a.positions)).sum())
-            short = np.linalg.norm(b.positions - a.positions, axis=1).max() < PATH_MAX_STEP_A
-            if short and not (a.info.get("rattled") or b.info.get("rattled")) and abs(de - pred) > PATH_JUMP_EV:
-                bad.add("energy")
-            sa, sb = a.arrays.get("nbo_spins"), b.arrays.get("nbo_spins")
-            if (a.info["spin"] > 1 or a.info.get("bs")) and sa is not None and sb is not None \
-                    and np.isfinite(sa).all() and np.isfinite(sb).all() and np.abs(sb - sa).max() > PATH_SPIN_E:
-                bad.add("spin")
+            bad = False
+            if test == "energy":
+                de = b.get_potential_energy() - a.get_potential_energy()
+                pred = -0.5 * float(((a.get_forces() + b.get_forces()) * (b.positions - a.positions)).sum())
+                short = np.linalg.norm(b.positions - a.positions, axis=1).max() < PATH_MAX_STEP_A
+                bad = short and abs(de - pred) > PATH_JUMP_EV
+            else:
+                sa, sb = a.arrays.get("nbo_spins"), b.arrays.get("nbo_spins")
+                bad = bool((a.info["spin"] > 1 or a.info.get("bs")) and sa is not None and sb is not None
+                           and np.isfinite(sa).all() and np.isfinite(sb).all()
+                           and np.abs(sb - sa).max() > PATH_SPIN_E)
             for x in (a, b) if bad else ():
-                x.info["path_flag"] = ",".join(sorted(bad | (set(x.info["path_flag"].split(",")) - {"ok"})))
-            n += bool(bad)
+                x.info["path_flag"] = ",".join(sorted({test} | (set(x.info["path_flag"].split(",")) - {"ok"})))
+            n += bad
     return n
 
 

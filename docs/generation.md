@@ -63,7 +63,7 @@ xTB 결과는 `<out>/xtb_cache`에 저장됨. key는 xtb 입력 전체(좌표, c
 | sampler | 만드는 구조 | 주요 설정 | job |
 |---|---|---|---|
 | `monomer` | 분자/음이온 최적화 구조, normal-mode 변형, torsion/angle 변형, 단원자 양이온 | `n_normal_mode`, `n_distort`, `T_K` | opt / sp |
-| `atoms` | 단원자 기준 deck: 설정한 종의 모든 원소, charge −1/0/+1 (H⁺ 제외). delta_q 0 stage에서만, vertical deck 없음 | `high_spin_fraction` (1.0 권장: N 4중항 같은 Hund 바닥 상태) | sp |
+| `atoms` | 단원자 기준 deck: 설정한 종의 모든 원소, charge −1/0/+1 (H⁺ 제외). delta_q 0 stage에서만, vertical deck 없음 | multiplicity는 Hund 바닥 상태 하나만 씀 (예: C 3중항, N 4중항, O⁺ 4중항, P⁻ 3중항). `high_spin_fraction`은 쓰지 않음 | sp |
 | `pair_scan` | 두 성분의 거리를 바꾼 binding curve. 양이온 쌍(Li–Li, Li–Na, Na–Na) 포함 | `max_pairs`, `n_orient`, `scales` | sp |
 | `cluster` | M+(solvent)n(anion)m 최적화 구조, 흔든 구조, 늘이거나 줄인 구조 | `n_distort`, `rattle_A` (숫자나 목록, 기본 0.05 Å, xTB 기준 원자당 약 0.1 eV), `dilate`, `m_stretch` | opt / sp |
 | `cluster_md` | 양이온 1개 + 용매 n개(+ 음이온)의 xTB MD frame을 RMSD로 골라 씀 | `n_solvent`, `with_anion`, `T_K`, `time_ps`, `equil_ps`, `dump_fs`, `n_frames`, `max_clusters`, `max_atoms` | sp |
@@ -164,6 +164,7 @@ opt deck은 `g16.pop_always: true`(기본값)일 때 매 step의 charge와 spin�
   - Δq ≠ 0이면 xTB 부분전하 변화로도 찾음: q와 q − Δq에서 xTB sp를 돌려, 환원이면 전하가 0.15 e 이상 줄어든 원자, 산화면 0.15 e 이상 늘어난 원자 (H, Li, Na 제외, 최대 2개). SMILES에 radical 표시가 없는 radical 이온(예: 환원된 EC)도 `radical_couple`, `h_abstract`에 쓰임. params `charge_radicals`.
   - 후보는 template별로 섞고 template 순서도 무작위로 정한 뒤 돌아가며 `max_per_cluster`개를 고름. `intra_shift` 후보가 다른 template보다 훨씬 많아 다른 template이 뽑히지 않던 문제 때문임.
   - concerted xTB scan의 최고점 ±`k_peak`개 frame에 첫 frame과 마지막 frame을 더해 씀.
+  - `path_rattle_A`를 써도 최고점과 끝 frame은 흔들지 않음.
   - 엄밀한 TS가 아님. 반응 PES를 sampling하기 위한 구조임.
 - **reaction2**
   - 후보와 선택 규칙은 reaction과 같음.

@@ -78,6 +78,8 @@ def test_parse_hangang_test_decks():
     t3.info["s2_dev"] = 1.2
     assert reject(t3) == "s2"
     t2.info["s2_dev"] = 0.3                                      # contaminated doublet (non-BS bound 0.25)
+    assert reject(t2) == ""                                      # unknown sampler: reactive bound 1.1
+    t2.info["sampler"] = "cluster"
     assert reject(t2) == "s2"
     t2.info["s2_dev"], t2.info["homo_eV"] = 0.0, 0.5             # unbound electron
     assert reject(t2) == "homo"
@@ -94,8 +96,8 @@ def test_hirshfeld_moments_homo():
     assert np.isclose(a.arrays["hirshfeld_charges"].sum(), 1.0, atol=1e-3)
     assert np.isclose(a.arrays["hirshfeld_spins"].sum(), 1.0, atol=1e-3)
     assert np.isclose(a.arrays["cm5_charges"][1], 0.409410) and np.isclose(a.arrays["cm5_charges"].sum(), 1.0, atol=1e-3)
-    assert np.allclose(a.info["dipole"], np.array([-4.2644, 0.5489, 0.1585]) * DEBYE_EA)
-    assert np.isclose(a.info["quadrupole"][0], -2.1565 * DEBYE_EA)
+    assert np.allclose(a.info["dipole_eA"], np.array([-4.2644, 0.5489, 0.1585]) * DEBYE_EA)
+    assert np.isclose(a.info["quadrupole_eA2"][0], -2.1565 * DEBYE_EA)
     assert np.isclose(a.info["homo_eV"], -0.61773 * 27.211386245988, atol=1e-4)  # beta HOMO is the higher one
     assert not a.info["bs"]
 
@@ -139,8 +141,9 @@ def test_flag_paths_energy_and_spin(tmp_path):
     frames[5].arrays["nbo_spins"] = np.array([0.1, 0.9])   # unpaired electron jumped
     assert flag_paths(frames) == 3
     assert [a.info["path_flag"] for a in frames] == ["ok", "ok", "energy", "energy", "energy,spin", "spin"]
-    frames[3].info["rattled"] = True                       # rattled frames are not energy-checked
-    assert flag_paths(frames) == 1 and frames[3].info["path_flag"] == "ok"
+    frames[3].info["rattled"] = True                       # rattled frames: energy compared across them
+    assert flag_paths(frames) == 1                         # exact neighbours 2 and 4 are consistent
+    assert [a.info["path_flag"] for a in frames] == ["ok", "ok", "ok", "ok", "spin", "spin"]
     write(tmp_path / "p.extxyz", frames, format="extxyz")
     assert read(tmp_path / "p.extxyz", ":")[0].info["path_flag"] == "ok"
     assert path_key("hop", {"kind": "hop", "t": 0.5, "cation_index": 0, "from_donor": 1, "to_donor": 2})[1] == 0.5
