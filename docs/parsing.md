@@ -37,6 +37,7 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
 | info | `quadrupole` | e·Å², traceless (XX, YY, ZZ, XY, XZ, YZ). Gaussian "Traceless Quadrupole moment" (Debye·Å) × 0.20819434 |
 | info | `homo_eV` | 가장 높은 점유 궤도 에너지 (α와 β 중 큰 값), eV |
 | info | `bs` | route에 `guess=mix`가 있으면 true (BS singlet) |
+| info | `path`, `path_pos`, `rattled`, `path_flag` | 경로 key, 경로 위치, 흔든 frame 여부, 연속성 표시 (`--registry`를 줄 때, 경로 sp frame만) |
 | info | `sampler`, `composition`, `group` | `--registry`를 줄 때만. `group` = 조성. train/test를 group으로 나누면 같은 cluster·경로가 양쪽에 들어가지 않음 |
 
 - key 이름은 `6_build_charge-aware-mlip`과 같은 규칙을 따름.
@@ -45,6 +46,16 @@ rmd parse logs/ -o data.extxyz --registry runs/example/registry.sqlite
   - `s2_dev`가 BS singlet은 1.1, 그 밖의 open-shell은 0.25 초과 (Sc–Zn이 있으면 0.5와 비교해 작은 값). 1.1은 OMol25 기준을 이상값과의 차이로 읽은 값(절대값이면 triplet이 모두 빠짐)이고 BS singlet의 완전한 spin 분리(차이 약 1)를 허용함. 0.25는 우리 선택임 (예: doublet인데 ⟨S²⟩ 1.8이면 오염된 상태). Li/Na는 metal 기준에 넣지 않음.
   - `homo_eV` > 0: 추가 전자가 결합하지 않고 diffuse basis 꼬리에 있음.
 - NBO spin은 NBO 출력의 alpha와 beta natural population 차이로 계산함.
+
+## 경로 연속성 표시 (`path_flag`)
+
+`--registry`를 주면 같은 경로의 sp frame을 경로 순서대로 비교해 `path_flag`를 붙임. 같은 경로는 sampler, 조성, charge, multiplicity, BS, 경로 key가 같은 frame임. 경로 key는 bond_scan의 bond, reaction의 template과 원자 쌍, hop의 양이온과 donor임. frame은 버리지 않음.
+
+- `ok`: 이상 없음.
+- `energy`: 흔들지 않은 이웃 frame 사이 원자 최대 이동이 0.5 Å 미만인데, 에너지 변화가 force로 예상한 값 −½(F_a + F_b)·(R_b − R_a)와 2 eV 넘게 다름. SCF가 다른 해에 수렴했을 가능성이 있음.
+- `spin`: 원자 하나의 NPA spin이 이웃 frame 사이에서 0.5 e 넘게 바뀜. 홀전자가 옮겨 감. 실제 반응(H 이동, 결합 절단)에서도 생길 수 있음.
+- 기준값은 우리 선택임. c4 test config의 xTB 경로로 시험한 결과(2026-11-06, 우리 계산)를 근거로 정함. 이동이 크거나 흔든 frame이 낀 구간은 예상값 오차가 커서(중앙값 0.4–2.6 eV) 에너지 검사에서 뺌.
+- 단원자, vertical deck, 최고점 rattle 복사본은 경로에 넣지 않음.
 
 ## 확인 결과 (Hangang G16 c02, job 1212786, 2026-11-04, test_decks/ t1–t3)
 

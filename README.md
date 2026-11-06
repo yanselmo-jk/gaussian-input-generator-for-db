@@ -33,7 +33,7 @@ log 파일명은 `.gjf`와 같게 유지해야 함 (`<id>.gjf` → `<id>.log`).
 | 명령 | 하는 일 |
 |---|---|
 | `rmd generate CONFIG [--dry] [--only SAMPLER ...]` | 구조 생성, Gaussian 입력 작성 |
-| `rmd parse PATH... -o OUT.extxyz [--registry DB] [--keep-all]` | Gaussian log를 extxyz로 변환. force / ⟨S²⟩ / HOMO 필터 적용. `--registry`를 주면 sampler, 조성, group을 frame에 붙임 |
+| `rmd parse PATH... -o OUT.extxyz [--registry DB] [--keep-all]` | Gaussian log를 extxyz로 변환. force / ⟨S²⟩ / HOMO 필터 적용. `--registry`를 주면 sampler, 조성, group과 경로 연속성 표시(`path_flag`)를 frame에 붙임 |
 | `rmd submit TARGET... --registry DB [--undo]` | 제출한 deck 표시 (generated → submitted). TARGET: id, .gjf, 폴더, manifest .csv |
 | `rmd list --registry DB [--status S] [--sampler ...]` | 상태별 deck 목록 (기본 submitted) |
 | `rmd status --registry DB` | sampler별, 상태별 개수 |

@@ -117,3 +117,31 @@ def test_parse_cmd_adds_registry_group(tmp_path):
     (a,) = read(out, ":")
     assert a.info["group"] == "EC1" and a.info["sampler"] == "monomer"
     assert np.isfinite(a.info["homo_eV"]) and a.arrays["cm5_charges"].shape == (len(a),)
+
+
+def test_flag_paths_energy_and_spin(tmp_path):
+    """Smooth harmonic path passes; an energy offset on one frame or a moved NPA spin marks its segments."""
+    from ase import Atoms
+    from ase.io import read, write
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from rmlipdata.parse import flag_paths, path_key
+    k, frames = 5.0, []
+    for i, x in enumerate(np.linspace(1.0, 2.0, 6)):
+        a = Atoms("HF", positions=[[0, 0, 0], [x, 0, 0]])
+        e, f = 0.5 * k * (x - 1.2) ** 2, k * (x - 1.2)
+        a.calc = SinglePointCalculator(a, energy=e, forces=[[f, 0, 0], [-f, 0, 0]])
+        a.arrays["nbo_spins"] = np.array([0.9, 0.1])
+        a.info.update(sampler="bond_scan1", composition="HF1", charge=0, spin=2, bs=False,
+                      path="bond:0-1", path_pos=float(i))
+        frames.append(a)
+    assert flag_paths(frames) == 0 and all(a.info["path_flag"] == "ok" for a in frames)
+    frames[3].calc.results["energy"] += 3.0                 # SCF landed on another solution
+    frames[5].arrays["nbo_spins"] = np.array([0.1, 0.9])   # unpaired electron jumped
+    assert flag_paths(frames) == 3
+    assert [a.info["path_flag"] for a in frames] == ["ok", "ok", "energy", "energy", "energy,spin", "spin"]
+    frames[3].info["rattled"] = True                       # rattled frames are not energy-checked
+    assert flag_paths(frames) == 1 and frames[3].info["path_flag"] == "ok"
+    write(tmp_path / "p.extxyz", frames, format="extxyz")
+    assert read(tmp_path / "p.extxyz", ":")[0].info["path_flag"] == "ok"
+    assert path_key("hop", {"kind": "hop", "t": 0.5, "cation_index": 0, "from_donor": 1, "to_donor": 2})[1] == 0.5
+    assert path_key("bond_scan1", {"bond": [0, 1], "index": 3, "vertical_dq": 1}) is None

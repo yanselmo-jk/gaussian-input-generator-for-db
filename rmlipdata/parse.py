@@ -241,6 +241,68 @@ def reject(at):
     return ""
 
 
+# Path continuity check. Frames of one generated path (same sampler, composition, charge, multiplicity, BS flag and
+# path key) are ordered by their path position; for neighbours a, b the energy change is compared with the work of
+# the forces along the straight segment, dE_pred = -1/2 (F_a + F_b) . (R_b - R_a) (trapezoid rule, exact for a
+# quadratic PES; rigid translation / rotation do no work). A mismatch means the SCF landed on a different solution
+# (or the PES is not smooth on that segment); a jump of an NPA atomic spin means the unpaired electron moved.
+# Both frames of a bad segment are marked, nothing is dropped. Thresholds are our choice, not literature values.
+# The trapezoid estimate is only good for short segments: on xTB paths of the c4 test config (2026-11-06, our
+# calculation) exact neighbours differ by 0.42 eV median (max 9.2 eV) because atoms move 0.6 A median between
+# frames, and rattled frames by 2.6 eV median. So the energy check uses only unrattled neighbours whose largest
+# atomic displacement is below 0.5 A (xTB max residual there 1.66 eV) and flags only gross jumps above 2 eV.
+PATH_JUMP_EV = 2.0
+PATH_MAX_STEP_A = 0.5
+PATH_SPIN_E = 0.5
+
+
+def path_key(sampler, params):
+    """(key, position) of a generated path frame from its registry params, or None (not on a path)."""
+    p = params or {}
+    if "vertical_dq" in p or "peak_rattle" in p:
+        return None  # vertical charge decks and rattled peak copies branch off the path
+    if sampler in ("bond_scan1", "bond_scan2") and "bond" in p:
+        return f"bond:{p['bond'][0]}-{p['bond'][1]}", float(p.get("index", 0))
+    if sampler in ("reaction", "reaction2") and "template" in p:
+        return f"{p['template']}:{p.get('pairs')}", float(p.get("index", 0))
+    if sampler == "hop" and p.get("kind") == "exchange_out":
+        return f"exchange:{p.get('cation_index')}:{p.get('donor')}", float(p.get("index", 0))
+    if sampler == "hop" and "t" in p:
+        return f"hop:{p.get('cation_index')}:{p.get('from_donor')}>{p.get('to_donor')}", float(p["t"])
+    return None
+
+
+def flag_paths(frames):
+    """Set info path_flag ('ok', 'energy', 'spin' or 'energy,spin'; extxyz cannot store '') on path frames."""
+    groups = {}
+    for a in frames:
+        if "path" in a.info:
+            a.info["path_flag"] = "ok"
+            key = (a.info.get("sampler"), a.info.get("composition"), a.info["charge"], a.info["spin"],
+                   bool(a.info.get("bs")), a.info["path"])
+            groups.setdefault(key, []).append(a)
+    n = 0
+    for g in groups.values():
+        g.sort(key=lambda a: a.info["path_pos"])
+        for a, b in zip(g, g[1:]):
+            if a.get_chemical_symbols() != b.get_chemical_symbols():
+                continue
+            bad = set()
+            de = b.get_potential_energy() - a.get_potential_energy()
+            pred = -0.5 * float(((a.get_forces() + b.get_forces()) * (b.positions - a.positions)).sum())
+            short = np.linalg.norm(b.positions - a.positions, axis=1).max() < PATH_MAX_STEP_A
+            if short and not (a.info.get("rattled") or b.info.get("rattled")) and abs(de - pred) > PATH_JUMP_EV:
+                bad.add("energy")
+            sa, sb = a.arrays.get("nbo_spins"), b.arrays.get("nbo_spins")
+            if (a.info["spin"] > 1 or a.info.get("bs")) and sa is not None and sb is not None \
+                    and np.isfinite(sa).all() and np.isfinite(sb).all() and np.abs(sb - sa).max() > PATH_SPIN_E:
+                bad.add("spin")
+            for x in (a, b) if bad else ():
+                x.info["path_flag"] = ",".join(sorted(bad | (set(x.info["path_flag"].split(",")) - {"ok"})))
+            n += bool(bad)
+    return n
+
+
 def log_atoms(path):
     """All frames of a log; id = file stem (= registry id)."""
     sid = Path(path).stem

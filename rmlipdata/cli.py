@@ -385,11 +385,15 @@ def parse_cmd(paths, out, db=None, keep_all=False):
     for log in logs:
         steps = parse.parse_log(log)
         fr = [a for i, st in enumerate(steps) for a in parse.to_atoms(st, log.stem, i)]
-        row = con.execute("SELECT sampler, composition FROM structures WHERE id=?", (log.stem,)).fetchone() \
+        row = con.execute("SELECT sampler, composition, params FROM structures WHERE id=?", (log.stem,)).fetchone() \
             if con else None
+        prm = json.loads(row["params"] or "{}") if row else {}
+        pk = parse.path_key(row["sampler"], prm) if row else None
         for a in fr:  # group = composition: split train/test by group so no cluster or path is on both sides
             if row:
                 a.info.update(sampler=row["sampler"], composition=row["composition"], group=row["composition"])
+            if pk and a.info.get("job") == "sp":
+                a.info.update(path=pk[0], path_pos=pk[1], rattled="rattle_A" in prm)
         ok = bool(fr) and bool(steps) and all(s["normal"] for s in steps)
         failed += 0 if ok else 1
         for a in fr:
@@ -400,6 +404,7 @@ def parse_cmd(paths, out, db=None, keep_all=False):
         if con and not registry.set_status(con, log.stem, "parsed" if ok else "failed", log):
             print(f"warning: {log.stem} is not in the registry", file=sys.stderr)
             missing += 1
+    n_bad = parse.flag_paths(frames)
     if frames:  # write first: a failed write must not leave 'parsed' rows without data
         tmp = Path(f"{out}.tmp")
         ase_write(tmp, frames, format="extxyz")
@@ -408,6 +413,10 @@ def parse_cmd(paths, out, db=None, keep_all=False):
         con.commit()
         con.close()
     print(f"{len(logs)} logs, {len(frames)} frames, {failed} failed")
+    if n_bad:
+        print(f"path check: {n_bad} neighbour pairs marked (info path_flag): energy change differs from the force "
+              f"work by > {parse.PATH_JUMP_EV:g} eV (unrattled, step < {parse.PATH_MAX_STEP_A:g} A), or an NPA "
+              f"atomic spin changes by > {parse.PATH_SPIN_E:g} e")
     if +dropped:
         print(f"dropped by quality filters: {dropped['force']} with a force > {parse.MAX_FORCE:g} eV/A, "
               f"{dropped['s2']} with <S2> - S(S+1) above {parse.MAX_S2_DEV_PURE:g} ({parse.MAX_S2_DEV:g} for BS "
